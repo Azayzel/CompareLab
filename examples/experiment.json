@@ -1,0 +1,26 @@
+{
+  "prompt": "Explain how an API should handle authentication errors.",
+  "baseline": {
+    "model": "Model A (example)",
+    "reportedModel": null,
+    "contextWindowTokens": null,
+    "contextWindowSource": "unverified",
+    "inputTokens": null,
+    "outputTokens": null,
+    "finishReason": null,
+    "response": "When authentication fails, return an error message explaining what went wrong."
+  },
+  "candidate": {
+    "model": "Model B (example)",
+    "reportedModel": null,
+    "contextWindowTokens": null,
+    "contextWindowSource": "unverified",
+    "inputTokens": null,
+    "outputTokens": null,
+    "finishReason": null,
+    "response": "When authentication fails, return HTTP 401 for invalid credentials or HTTP 403 for insufficient permissions. Never expose tokens or internal implementation details."
+  },
+  "checks": {
+    "requiredPhrases": ["401", "403"]
+  }
+}

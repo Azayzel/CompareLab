@@ -1,0 +1,22 @@
+{
+  "name": "comparelab",
+  "displayName": "CompareLab",
+  "description": "Lightweight, context-aware AI response and prompt comparison inside VS Code.",
+  "version": "0.1.0",
+  "publisher": "azayzel",
+  "private": true,
+  "license": "MIT",
+  "engines": { "vscode": "^1.90.0", "node": ">=20" },
+  "main": "./src/extension.js",
+  "type": "commonjs",
+  "categories": ["Other", "Machine Learning"],
+  "activationEvents": ["onCommand:comparelab.open"],
+  "contributes": {
+    "commands": [{ "command": "comparelab.open", "title": "CompareLab: Compare Model Outputs" }]
+  },
+  "scripts": {
+    "test": "node --test",
+    "compare": "node bin/comparelab.js",
+    "package": "npx --yes @vscode/vsce package"
+  }
+}
