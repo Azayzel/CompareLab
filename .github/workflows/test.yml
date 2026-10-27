@@ -11,4 +11,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: node --test
+      - name: Check JavaScript syntax
+        run: |
+          node --check src/core.js
+          node --check src/providers.js
+          node --check src/extension.js
+          node --check media/app.js
+          node --check bin/comparelab.js
+      - name: Run tests
+        run: node --test
