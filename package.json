@@ -1,8 +1,8 @@
 {
   "name": "comparelab",
   "displayName": "CompareLab",
-  "description": "Lightweight, context-aware AI response and prompt comparison inside VS Code.",
-  "version": "0.1.0",
+  "description": "Compare AI models and prompt variants in VS Code with inline diffs, controlled evaluations, and local-first Ollama/OpenAI-compatible runners.",
+  "version": "0.2.0",
   "publisher": "azayzel",
   "private": true,
   "license": "MIT",
