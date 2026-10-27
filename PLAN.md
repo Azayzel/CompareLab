@@ -1,39 +1,56 @@
 # PLAN — CompareLab
 
-## Original request / baseline
+## Original request (baseline)
 
-Make it easy to visualize the outputs of two or more AI models given the same prompt, or subtle prompt changes to a single model. Combine Git-style diffs and QuillBot-style readable changes. Help teams evaluate which responses work better using controlled, reproducible comparisons rather than superficial text changes. The Docker image Web Vitals comparison skill is the methodological starting point.
+Build a visual way to compare outputs from two or more AI models given the same prompt, and to evaluate subtle changes to prompts on the same model. Combine **Git diff** with QuillBot-like readable edit highlighting so a team can see what changed and judge what works best.
 
-## Constraints and decisions
+Take inspiration from the user's Docker-image Web Vitals skill: capture an explicit baseline and candidate, control variables, record real measurements with provenance, surface confounders and incomplete runs, and publish reproducible results. Don't assume different wording implies a better answer.
 
-- Keep the original simple two-panel UI; no dashboard.
-- VS Code extension first, shared comparison engine and CLI alongside it.
-- Local-first with no third-party runtime packages, database, or permanent service.
-- Capture provider-reported usage and model identity; don't invent a model's context window.
+## Product constraints
 
-## V0.1 completed
+- **VS Code first**, with a reusable core and optional CLI; avoid a separate web application for the initial product.
+- Preserve the **simple two-panel UI**; no dashboards, database, authentication service, or third-party runtime packages.
+- Make every model request **opt-in**. Keep API keys out of export files and Webview state.
+- Treat model context-window claims as **provenance-bearing metadata**, not a guessed constant.
+- Never declare a universal winner from a single text diff.
 
-- [x] VS Code side-by-side entry and inline word diff
-- [x] Context/usage metadata and comparison-confidence warnings
-- [x] Deterministic required phrase checks
-- [x] JSON import/export and Markdown report
-- [x] Reusable pure JavaScript engine and CLI
+## Shipped: v0.1
 
-## V0.2 — opt-in provider execution
+- [x] VS Code Webview: baseline, candidate, simple inline word-level diff.
+- [x] Separate shared prompt and per-variant overrides.
+- [x] Manual pasted responses, JSON import/export, Markdown report.
+- [x] Literal required-phrase checks and context/usage comparison warnings.
+- [x] Dependency-free `src/core.js` and standalone comparison CLI.
+- [x] Initial Node built-in tests and CI.
 
-- [x] Native Ollama /api/chat with explicit num_ctx, num_predict, temperature
-- [x] OpenAI-compatible /chat/completions with selectable output-token field
-- [x] Endpoint-scoped API keys in VS Code SecretStorage
-- [x] HTTP localhost or HTTPS remote, no redirects, bounded responses, request timeout
-- [x] Per-variant Run and sequential Run both
-- [x] Normalize requested/resolved model, usage, finish reason and actual prompt
-- [x] Mocked request/error/security tests
-- [ ] Verify with live Ollama and live OpenAI-compatible servers
-- [ ] Verify UX in an actual VS Code Extension Development Host
+## Shipped: v0.2
 
-## Next
+- [x] Opt-in **native Ollama** `/api/chat` runner.
+- [x] Opt-in **OpenAI-compatible** `/chat/completions` runner with two output-budget field options.
+- [x] Per-side **Run** and sequential **Run both**.
+- [x] Exact run prompt, response, returned model identifier, usage counters, and finish reason where supported.
+- [x] Optional Ollama `num_ctx`, `num_predict`, and temperature; provider defaults remain unknown when omitted.
+- [x] Endpoint-scoped bearer keys via VS Code SecretStorage; no keys in exports.
+- [x] HTTPS remote / HTTP loopback only, no redirects, bounded responses, request timeout.
+- [x] Mocked tests for successful responses, compatibility fields, missing usage, validation and error paths.
+- [x] CI Node tests and syntax checks for extension/Webview files.
+- [x] Updated README, security, contribution and reusable comparison procedure.
 
-- Build a small opt-in real-provider smoke-test matrix.
-- Optional model discovery, provider presets, repeated trials, multi-variant experiment matrix.
-- Add semantic/task-specific evaluations with evidence and human review before automated scoring.
-- Keep CI checks advisory unless a user explicitly requests gating.
+## Validation status
+
+- [x] GitHub Actions **unit/syntax checks** have passed for v0.2 code.
+- [ ] Live Ollama integration smoke test against an installed local model.
+- [ ] Live OpenAI/compatible endpoint smoke test (requires user-authorized key/endpoint).
+- [ ] Manual interaction/accessibility test in VS Code Extension Development Host.
+- [ ] VSIX packaging and installation smoke test.
+
+Do not represent mock-backed tests as live provider verification.
+
+## Next milestones
+
+1. Finish the live/interactive validation above and fix any compatibility defects.
+2. Support repeatable task suites and multiple paired samples before offering a team-level decision.
+3. Introduce optional provider/model discovery, robust recording of run settings and evidence-based checks.
+4. Evaluate adding a third+ variant and semantic/human scoring without compromising UI simplicity.
+
+Future ideas and intentionally deferred scope remain in [SHELVED.md](SHELVED.md). See [DECISIONS.md](DECISIONS.md) for rationale.
