@@ -79,21 +79,24 @@ function getContent(message) {
   return '';
 }
 
-/**
- * @param {object} input provider, model, prompt, endpoint, num_ctx/context metadata, max tokens
- * @param {object} deps injectable fetch and API key for testing
- */
-async function runModel(input, { apiKey, fetchImpl = globalThis.fetch } = {}) {
+function validateModelInput(input) {
   const provider = String(input.provider || '');
   const endpoint = normalizedEndpoint(provider, input.endpoint);
   const model = String(input.model || '').trim();
   const prompt = String(input.prompt || '');
+  const systemPrompt = String(input.systemPrompt || '');
   if (!model) throw new Error('Enter a model ID before running');
   if (!prompt.trim()) throw new Error('Enter a prompt before running');
-  if (prompt.length > 150000) throw new Error('Prompt exceeds the 150,000-character limit');
+  if (prompt.length + systemPrompt.length > 150000) throw new Error('Prompt exceeds the 150,000-character limit');
   const context = intOpt(input.contextWindowTokens, 'Context window');
   const maxOutput = intOpt(input.maxOutputTokens, 'Output cap');
   const temperature = tempOpt(input.temperature);
+  return { provider, endpoint, model, prompt, systemPrompt, context, maxOutput, temperature };
+}
+
+async function runModel(input, { apiKey, fetchImpl = globalThis.fetch, signal } = {}) {
+  const { provider, endpoint, model, prompt, systemPrompt, context, maxOutput, temperature } = validateModelInput(input);
+  const messages = [...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []), { role: 'user', content: prompt }];
   const headers = { 'Content-Type': 'application/json' };
   let target, body;
   if (provider === 'ollama') {
@@ -102,11 +105,11 @@ async function runModel(input, { apiKey, fetchImpl = globalThis.fetch } = {}) {
     if (context !== null) options.num_ctx = context;
     if (maxOutput !== null) options.num_predict = maxOutput;
     if (temperature !== null) options.temperature = temperature;
-    body = { model, messages: [{ role: 'user', content: prompt }], stream: false };
+    body = { model, messages, stream: false };
     if (Object.keys(options).length) body.options = options;
   } else {
     target = endpoint + '/chat/completions';
-    body = { model, messages: [{ role: 'user', content: prompt }], stream: false };
+    body = { model, messages, stream: false };
     if (maxOutput !== null) {
       const field = input.tokenLimitField === 'max_tokens' ? 'max_tokens' : 'max_completion_tokens';
       body[field] = maxOutput;
@@ -115,17 +118,29 @@ async function runModel(input, { apiKey, fetchImpl = globalThis.fetch } = {}) {
     if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
   }
   const start = Date.now();
+  const controller = new AbortController();
+  const cancel = () => controller.abort(new DOMException('Model request cancelled', 'AbortError'));
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener('abort', cancel, { once: true });
+  const timer = setTimeout(() => controller.abort(new DOMException('Model request timed out', 'TimeoutError')), REQUEST_TIMEOUT_MS);
   let res;
+  let text;
   try {
+    controller.signal.throwIfAborted();
     res = await fetchImpl(target, {
       method: 'POST', headers, body: JSON.stringify(body),
-      redirect: 'error', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      redirect: 'error', signal: controller.signal
     });
+    text = await readBounded(res);
+    controller.signal.throwIfAborted();
   } catch (error) {
-    if (error.name === 'TimeoutError') throw new Error('Model request timed out after 180 seconds');
+    if (signal?.aborted) throw new DOMException('Model request cancelled', 'AbortError');
+    if (controller.signal.reason?.name === 'TimeoutError' || error.name === 'TimeoutError') throw new Error('Model request timed out after 180 seconds');
     throw new Error('Could not contact model endpoint: ' + (error.message || 'connection failed'));
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', cancel);
   }
-  const text = await readBounded(res);
   if (!res.ok) throw serverError(text, res.status);
   let data;
   try { data = JSON.parse(text); } catch { throw new Error('Model endpoint returned invalid JSON'); }
@@ -144,6 +159,7 @@ async function runModel(input, { apiKey, fetchImpl = globalThis.fetch } = {}) {
   return {
     provider, model, reportedModel: typeof data.model === 'string' ? data.model : null,
     prompt, response,
+    ...(systemPrompt ? { systemPrompt } : {}),
     contextWindowTokens: context,
     contextWindowSource: provider === 'ollama' && context ? 'configured' : (input.contextWindowSource || 'unverified'),
     inputTokens, outputTokens, maxOutputTokens: maxOutput,
@@ -153,4 +169,4 @@ async function runModel(input, { apiKey, fetchImpl = globalThis.fetch } = {}) {
   };
 }
 
-module.exports = { runModel, normalizedEndpoint, DEFAULT_ENDPOINTS };
+module.exports = { runModel, validateModelInput, normalizedEndpoint, DEFAULT_ENDPOINTS };

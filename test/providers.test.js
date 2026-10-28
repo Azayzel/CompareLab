@@ -96,3 +96,31 @@ test('honors non-2xx errors without dumping request body or secrets', async () =
     { apiKey: 'TOPSECRET', fetchImpl: async () => response({ error: { message: 'No quota' } }, 429) }),
     e => e.message.includes('429') && !e.message.includes('TOPSECRET'));
 });
+
+test('cancellation before or during a request aborts provider execution', async () => {
+  const input = { provider: 'ollama', model: 'model', prompt: 'Task' };
+  const cancelled = new AbortController();
+  cancelled.abort();
+  let requests = 0;
+  await assert.rejects(runModel(input, { signal: cancelled.signal, fetchImpl: async () => { requests++; } }), { name: 'AbortError' });
+  assert.equal(requests, 0);
+  const active = new AbortController();
+  await assert.rejects(runModel(input, { signal: active.signal, fetchImpl: async (url, options) => {
+    active.abort();
+    options.signal.throwIfAborted();
+  } }), { name: 'AbortError' });
+});
+
+test('CodeMind-style instructions and alert content retain their system/user roles for both providers', async () => {
+  for (const provider of ['ollama', 'openai']) {
+    let body;
+    const result = await runModel({ provider, model: 'test-model', systemPrompt: 'Agent instructions', prompt: 'Incoming event' }, {
+      fetchImpl: async (url, options) => {
+        body = JSON.parse(options.body);
+        return response(provider === 'ollama' ? { message: { content: 'Answer' } } : { choices: [{ message: { content: 'Answer' } }] });
+      }
+    });
+    assert.deepEqual(body.messages, [{ role: 'system', content: 'Agent instructions' }, { role: 'user', content: 'Incoming event' }]);
+    assert.equal(result.systemPrompt, 'Agent instructions');
+  }
+});

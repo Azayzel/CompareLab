@@ -15,6 +15,9 @@ jobs:
         run: |
           node --check src/core.js
           node --check src/providers.js
+          node --check src/copilot.js
+          node --check src/orchestration.js
+          node --check src/inputs.js
           node --check src/extension.js
           node --check media/app.js
           node --check bin/comparelab.js

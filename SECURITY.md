@@ -1,8 +1,12 @@
 # Security
 
-CompareLab is a local-first VS Code extension. Manual comparisons and the CLI work without model-network calls. **Only clicking Run or Run both sends a prompt to the selected model endpoint.** Remote provider services may log prompts, charge for usage, or apply their own retention policies.
+CompareLab is a local-first VS Code extension. Manual comparisons and the CLI work without model-network calls. **Run / Run both** send prompts to the selected provider endpoint. **Evaluate with Copilot** sends supplied tasks, evidence, and responses through VS Code's Language Model API after model selection and any required consent. **Analyze in Copilot Chat** opens an unsent draft; review it before sending. Provider and Copilot policies, usage charges, and retention rules apply.
 
 ## Credentials
+
+**Orchestrate Test** explicitly authorizes a bounded batch of provider generations plus Copilot reviews. The panel previews request counts; citation corrections may add one review request per pair. Both providers receive the same supplied instructions, trigger and evidence. No Kafka subscription, production remediation, or live tool investigation is performed.
+
+VS Code models are discovered through the editor's Language Model API and use the user's existing provider access, consent and policy. CompareLab does not read those credentials. Inputs are sent only by explicit Run/Orchestrate actions. This integration supplies no tools or privileged system messages; provider controls and actual usage are not inferred from token estimates.
 
 - OpenAI-compatible bearer keys are captured through a masked VS Code input and stored in **SecretStorage**, scoped to the normalized endpoint.
 - Keys are not included in Webview experiment state, JSON exports, Markdown reports, or code.
@@ -11,16 +15,22 @@ CompareLab is a local-first VS Code extension. Manual comparisons and the CLI wo
 
 ## Data handling
 
-- The extension keeps the working experiment in VS Code Webview state; exported JSON/Markdown may contain full prompts, model responses and configuration.
+- The extension keeps the working experiment in VS Code Webview state; exported JSON/Markdown may contain full prompts, source evidence, model responses and configuration. Markdown can also contain evaluator judgments and citations; assessments are otherwise held in memory, not restored from JSON.
+- Orchestrated tests also retain original agent text, raw/normalized triggers, exact model-facing requests, all retained pair outputs and judgments, timestamps and metrics in JSON and Markdown. Records are capped at 8 MiB and are not cryptographically authenticated. Review before sharing; input normalization and template insertion do not redact sensitive content.
+- **Load agent file** reads only the selected local text file (up to 150,000 characters). It does not execute the file, follow skill links, or grant tools named in frontmatter.
 - No CompareLab-owned hosted backend, user account or telemetry service is included.
 - The UI uses `textContent` for dynamic response text and a Webview Content Security Policy.
 - Do not run proprietary workloads against an unfamiliar compatible endpoint without approval.
+- Copilot review has no tools or chat-history access. Model labels are anonymized, but identities and secrets embedded inside source text are not redacted. Sanitize evidence before evaluation, draft handoff, or export.
+- Review prompts mark source content as untrusted data; citation validation recovers exact source substrings with whitespace-only tolerance, not factual correctness. Altered claims, punctuation, numbers, and Markdown are rejected. Prompt injection and misleading model judgments remain possible.
+- The Agent-mode chat draft requests read-only investigation, but this text is not a security boundary. Tool access and approvals remain controlled by VS Code/Copilot and the user.
 
 ## Connections
 
 - Remote requests require HTTPS; localhost/loopback HTTP is allowed.
 - Credentials in URLs, URL query strings/fragments, and HTTP redirects are rejected.
 - Requests have a **180-second timeout** and response bodies are limited to **2 MiB**.
+- Copilot reviews enforce a 150,000-character packet limit, estimated input-token capacity, a 180-second evaluation timeout, and 2 MiB per streamed response. Reversed-order checking runs two reviews by default, with at most one extra citation correction request across both orders. All attempts use the same limits, cancellation token, and source packet for that order. Request counts include corrections; actual token usage/cost are not exposed by this API.
 - These constraints are not a complete defense against malicious local services, DNS rebinding, compromised TLS, or untrusted providers. Only configure endpoints you trust.
 - Automated tests use mocks; no live security audit or production-provider certification has been completed.
 

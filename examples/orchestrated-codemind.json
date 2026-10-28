@@ -1,0 +1,10 @@
+{
+  "prompt": "# Example diagnostics agent\n\nAssess the incoming alert against the supplied evidence. Distinguish observations from hypotheses. Recommend the smallest safe investigation step and do not claim to have called tools. Return a concise report with evidence, unknowns, and one primary next action.",
+  "incomingMessage": "{\"alertEvent\":{\"eventName\":\"Synthetic HTTP errors\",\"shortDescription\":\"HTTP 401 increase\",\"description\":\"Authentication failures increased.\",\"environment\":\"test\",\"standardized\":{\"id\":\"synthetic-event-123\",\"state\":\"open\",\"severity\":\"warning\",\"priority\":3,\"startTime\":\"2026-10-28T00:00:00Z\"},\"sourceSystem\":{\"name\":\"Datadog\",\"id\":\"123\"},\"additionalDetails\":{\"alert_id\":\"123\",\"service\":\"example-api\"}},\"rawEventRef\":{\"topic\":\"synthetic-alerts\",\"partition\":0,\"offset\":42},\"sendAlert\":true}",
+  "evidence": "SYNTHETIC FIXTURE: HTTP 401 responses rose from 0 to 120 between 00:00 and 00:10 UTC. No deployment occurred in that window. Authentication logs and token-expiration data are unavailable. This is not production telemetry.",
+  "baseline": { "provider": "vscode", "model": "select-baseline-in-vscode" },
+  "candidate": { "provider": "vscode", "model": "select-candidate-in-vscode" },
+  "review": { "checkOrder": true },
+  "test": { "repetitions": 3 },
+  "checks": { "requiredPhrases": ["401"] }
+}
