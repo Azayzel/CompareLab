@@ -21,7 +21,8 @@ function tokens(result = {}, title = 'Tokens in / out', hint) {
 
 function usage(report) {
   if (!report) return '';
-  return metric('Azure-equivalent cost estimate', report.total, report.hint) + details('Per-turn costs and pricing assumptions',
+  return details('Per-turn costs and pricing assumptions',
+    metric('Azure-equivalent cost estimate', report.total, report.hint) +
     `<p class="notice">${escape(report.note)}</p><a href="https://azure.microsoft.com/en-us/pricing/details/azure-openai/">Official Azure pricing</a>
     <div class="usage-table"><table><thead><tr>${['Request', 'Model', 'Input', 'Output', 'USD short / standard', 'USD long', 'Basis']
     .map(title => `<th scope="col">${title}</th>`).join('')}</tr></thead><tbody>${report.rows.map(row => '<tr>' +
