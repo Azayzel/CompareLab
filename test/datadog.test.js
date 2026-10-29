@@ -138,6 +138,51 @@ test('does not accept fabricated model evidence or invoke unapproved tools', asy
   assert.equal(vscode.invocations.length, 0);
 });
 
+test('candidate usage and activity exclude baseline and evaluator activity across paired runs', async () => {
+  const { orchestrateTest, summarizeTest } = require('../src/orchestration');
+  const { compare } = require('../src/core');
+  const vscode = api();
+  const record = await orchestrateTest({
+    prompt: 'Investigate the example service', comparisonMode: 'end-to-end', test: { repetitions: 2 },
+    baseline: { provider: 'vscode', model: 'baseline-model' },
+    candidate: { provider: 'vscode', model: 'candidate-model' }
+  }, {
+    comparePair: compare,
+    evaluatePair: async () => ({ verdict: 'tie', criteria: [], unknowns: [], requestCount: 1,
+      usageTurns: [{ model: 'reviewer', inputTokens: 50000, outputTokens: 1000 }] }),
+    runVariant: (input, side) => {
+      let turns = 0;
+      const multiplier = side === 'baseline' ? 1 : 2;
+      return runDatadogAgent(vscode, input, [tool], async conversation => {
+        turns++;
+        if (turns === 1) assert.deepEqual(conversation, [
+          { role: 'user', content: input.prompt }, { role: 'user', content: DATADOG_AGENT_PROMPT }
+        ]);
+        for (const message of conversation.filter(message => message.role === 'tool')) {
+          assert.equal(JSON.parse(message.content).input.query, side);
+        }
+        return { inputTokens: 10 * multiplier, outputTokens: multiplier,
+          ...(turns === 1 ? { toolCalls: Array.from({ length: multiplier }, (_, i) =>
+            ({ callId: 'call-' + i, name: tool.name, input: { query: side } })) } : { response: side + ' answer' }) };
+      });
+    }
+  });
+  const summary = summarizeTest(record);
+  assert.equal(record.status, 'completed');
+  for (const [side, multiplier] of [['baseline', 1], ['candidate', 2]]) {
+    const metrics = summary.metrics[side];
+    assert.equal(metrics.inputTokens, 40 * multiplier);
+    assert.equal(metrics.outputTokens, 4 * multiplier);
+    assert.equal(metrics.toolCallCount, 2 * multiplier);
+    assert.equal(metrics.modelRequestCount, 4);
+    assert.equal(metrics.tokensPerRun.inputTokens, 20 * multiplier);
+    assert.equal(metrics.usage.rows.length, 4);
+    assert.ok(metrics.usage.rows.every(row => row.model === side + '-model'));
+  }
+  assert.equal(summary.evaluatorUsage.rows.length, 2);
+  assert.equal(summary.efficiency[0].value, '2.00x baseline');
+});
+
 test('one approval covers both models and all pairs but never carries to the next test', async () => {
   const vscode = api();
   let approvals = 0;
@@ -201,6 +246,117 @@ test('tool errors, unsupported results and empty results still fail visibly', as
     vscode.lm.invokeTool = async () => ({ content });
     await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], turn), /must return text|empty text/);
   }
+});
+
+test('invalid event arguments return the full schema for correction without changing either call', async () => {
+  const vscode = api();
+  const events = { name: 'mcp_datadog_search_datadog_events', description: 'Search events', inputSchema: {
+    type: 'object', additionalProperties: false, properties: {
+      query: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' },
+      max_tokens: { type: 'integer', description: 'Output token budget, not a row limit' },
+      start_at: { type: 'integer' }, sort: { type: 'string', enum: ['timestamp', '-timestamp', 'asc', 'desc'] }
+    }
+  } };
+  const invalid = { query: 'service:example', limit: 10 };
+  const corrected = { query: 'service:example', from: 'now-1h', to: 'now', max_tokens: 500, start_at: 0, sort: '-timestamp' };
+  const rejection = 'MPC -32602: validating "arguments": validating root: unexpected additional properties ["limit"]. ' +
+    'Valid fields: from, max_tokens, query, sort, start_at, to. max_tokens is an output token budget, not a row limit.';
+  const attempts = [];
+  vscode.lm.invokeTool = async (name, { input }) => {
+    attempts.push({ name, input: structuredClone(input) });
+    if (Object.hasOwn(input, 'limit')) throw new Error(rejection);
+    return { content: [new vscode.LanguageModelTextPart('Verified query result')] };
+  };
+  let turn = 0;
+  const progress = [];
+  const result = await runDatadogAgent(vscode, { prompt: 'Investigate', model: 'test-model' }, [events, tool],
+    async (conversation, tools) => {
+      assert.deepEqual(tools, [events, tool]);
+      turn++;
+      const usage = { inputTokens: 10, outputTokens: 2 };
+      if (turn === 1) return { ...usage, toolCalls: [
+        { callId: 'invalid', name: events.name, input: invalid }, { ...call(), callId: 'logs' }
+      ] };
+      const feedback = conversation.filter(message => message.role === 'tool');
+      assert.deepEqual(feedback.slice(0, 2).map(message => message.toolCallId), ['invalid', 'logs']);
+      const error = JSON.parse(feedback[0].content);
+      assert.equal(error.isError, true);
+      assert.equal(error.content, rejection);
+      assert.deepEqual(error.input, invalid);
+      assert.deepEqual(error.inputSchema, events.inputSchema);
+      if (turn === 2) return { ...usage, toolCalls: [{ callId: 'corrected', name: events.name, input: corrected }] };
+      assert.equal(JSON.parse(feedback[2].content).isError, undefined);
+      return { ...usage, response: 'Evidence-based answer' };
+    }, undefined, message => progress.push(message), new Set([events.name, tool.name]));
+  assert.deepEqual(attempts, [{ name: events.name, input: invalid }, { name: tool.name, input: call().input },
+    { name: events.name, input: corrected }]);
+  assert.equal(result.toolEvidence.length, 3);
+  assert.equal(result.toolEvidence[0].isError, true);
+  assert.equal(result.toolCallCount, 3);
+  assert.equal(result.modelRequestCount, 3);
+  assert.equal(result.usageTurns.length, 3);
+  assert.equal(result.inputTokens, 30);
+  assert.equal(result.outputTokens, 6);
+  assert.ok(progress.some(message => /returning the error and schema/.test(message)));
+});
+
+test('repeating rejected arguments stops visibly even if object keys are reordered', async () => {
+  const vscode = api();
+  let requests = 0;
+  vscode.lm.invokeTool = async () => { throw Object.assign(new Error('Invalid params'), { code: -32602 }); };
+  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async () => ({
+    toolCalls: [{ ...call(), input: ++requests === 1 ? { query: 'service:api', limit: 10 } : { limit: 10, query: 'service:api' } }]
+  })), /rejected the same arguments again after correction feedback: Invalid params/);
+  assert.equal(requests, 2);
+});
+
+test('argument errors alone cannot qualify as incident evidence', async () => {
+  const vscode = api();
+  vscode.lm.invokeTool = async () => { throw new Error('MCP error -32602: Invalid arguments'); };
+  let requests = 0;
+  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
+    async () => ++requests === 1 ? { toolCalls: [call()] } : { response: 'Unsupported conclusion' }),
+  /did not query Datadog MCP data/);
+  assert.equal(requests, 2);
+});
+
+test('duplicate rejected calls in one batch receive feedback before repeat detection applies', async () => {
+  const vscode = api();
+  let requests = 0;
+  vscode.lm.invokeTool = async (name, { input }) => {
+    if (input.limit) return { isError: true, content: [new vscode.LanguageModelTextPart('MCP -32602: Invalid arguments')] };
+    return { content: [new vscode.LanguageModelTextPart('Actual evidence')] };
+  };
+  const result = await runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async conversation => {
+    requests++;
+    if (requests === 1) return { toolCalls: ['one', 'two'].map(callId => ({
+      ...call(), callId, input: { query: 'example', limit: 1 }
+    })) };
+    if (requests === 2) {
+      assert.equal(conversation.filter(message => message.role === 'tool').length, 2);
+      return { toolCalls: [call()] };
+    }
+    return { response: 'Supported conclusion' };
+  });
+  assert.equal(result.toolEvidence.filter(entry => entry.isError).length, 2);
+  assert.equal(result.toolCallCount, 3);
+});
+
+test('fatal tool results, provider failures and cancellation are not argument recovery', async () => {
+  const vscode = api();
+  vscode.lm.invokeTool = async () => ({ isError: true, content: [new vscode.LanguageModelTextPart('Permission denied')] });
+  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
+    async () => ({ toolCalls: [call()] })), /Permission denied/);
+  const providerError = Object.assign(new Error('Model rejected its request'), { code: -32602 });
+  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
+    async () => { throw providerError; }), error => error === providerError);
+  const source = new vscode.CancellationTokenSource();
+  vscode.lm.invokeTool = async () => {
+    source.cancel();
+    throw Object.assign(new Error('Invalid params'), { code: -32602 });
+  };
+  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
+    async () => ({ toolCalls: [call()] }), source.token), vscode.CancellationError);
 });
 
 test('investigations continue past six model requests until the model answers', async () => {

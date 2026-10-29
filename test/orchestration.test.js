@@ -68,6 +68,19 @@ test('end-to-end results require real tool evidence before review and validate o
   assert.match(runner.reviews[0].evidence, /baseline logs/);
   assert.match(runner.reviews[0].evidence, /candidate logs/);
   assert.equal(summarizeTest(record).preference, 'candidate');
+  const rejected = { tool: 'mcp_datadog_search_datadog_events', input: { limit: 10 },
+    collectedAt: new Date().toISOString(), content: 'INVALID_ARGUMENTS_ONLY: unexpected limit', isError: true,
+    inputSchema: { type: 'object', properties: { query: { type: 'string' } } } };
+  record.pairs[0].baseline.result.toolEvidence.push(rejected);
+  assert.deepEqual(validateTestRecord(JSON.parse(JSON.stringify(record))).pairs[0].baseline.result.toolEvidence,
+    record.pairs[0].baseline.result.toolEvidence);
+  assert.doesNotMatch(pairEvidence(record.plan, record.pairs[0]), /INVALID_ARGUMENTS_ONLY/);
+  const errorOnly = structuredClone(record);
+  errorOnly.pairs[0].baseline.result.toolEvidence = [rejected];
+  assert.throws(() => validateTestRecord(errorOnly), /Invalid controlled-test record/);
+  rejected.isError = 'true';
+  assert.throws(() => validateTestRecord(record), /Invalid controlled-test record/);
+  rejected.isError = true;
   const tampered = structuredClone(record);
   tampered.pairs[0].baseline.result.toolEvidence = [];
   assert.throws(() => validateTestRecord(tampered), /Invalid controlled-test record/);

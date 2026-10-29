@@ -142,6 +142,7 @@ function validToolEvidence(evidence) {
   return Array.isArray(evidence) && evidence.length > 0 && evidence.every(item => item && typeof item.tool === 'string' &&
       isDatadogEvidenceTool(item.tool) && typeof item.content === 'string' && item.content.trim() &&
       item.input && typeof item.input === 'object' && !Array.isArray(item.input) && typeof item.collectedAt === 'string' &&
+      (item.isError === undefined || typeof item.isError === 'boolean') &&
       (item.requestedInput === undefined || item.requestedInput && typeof item.requestedInput === 'object' && !Array.isArray(item.requestedInput)) &&
       (item.truncated === undefined && item.originalCharacters === undefined && item.retainedCharacters === undefined ||
         typeof item.truncated === 'boolean' && Number.isSafeInteger(item.originalCharacters) &&

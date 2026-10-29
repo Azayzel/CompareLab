@@ -1052,12 +1052,27 @@ test('analysis and exports show exact screenshot ratios, averages, activity and 
   for (const pattern of [/~2.46x baseline/, /~2.36x baseline/, /2.19x baseline/, /~367,349.7 \/ ~10,546/,
     /Model turns 6/, /Tool calls 3/, /Run 3 \/ Turn 2/, /\$0.105755 \/ \$0.203453/, /\$2.520478 \/ \$4.882766/,
     /not Copilot or Azure billed cost/, /Evaluator usage \(separate/]) assert.match(text, pattern);
+  const costDetails = descendants(panel.field('testResults')).filter(node =>
+    node.tagName === 'DETAILS' && node.className.includes('usage-details'));
+  assert.ok(costDetails.length >= 2);
+  for (const detail of costDetails) {
+    assert.ok(!detail.open, 'Pricing starts collapsed');
+    assert.match(visibleText(detail), /Azure-equivalent cost estimate/);
+  }
+  const costTiles = descendants(panel.field('testResults')).filter(node =>
+    node.className === 'metric-tile' && visibleText(node).trimStart().startsWith('Azure-equivalent cost estimate'));
+  assert.equal(costTiles.length, costDetails.length, 'Every cost total is inside its pricing disclosure');
+  for (const tile of costTiles) assert.ok(costDetails.some(detail => descendants(detail).includes(tile)));
   assert.equal(result.testSummary.metrics.baseline.usage.rows.length, 6);
   assert.equal(result.testSummary.metrics.candidate.modelRequestCount, 6);
   const html = asHtml(result, { css: '', markdownScript: '' });
   for (const pattern of [/~2.46x baseline/, /Avg tokens in \/ out per run/, /Run 3 \/ Turn 2/, /\$2.520478 \/ \$4.882766/]) {
     assert.match(html, pattern);
   }
+  const htmlCosts = [...html.matchAll(/<details class="result-details"><summary>Per-turn costs and pricing assumptions<\/summary>([\s\S]*?)<\/details>/g)];
+  assert.ok(htmlCosts.length >= 2);
+  assert.equal(htmlCosts.length, (html.match(/Azure-equivalent cost estimate/g) || []).length);
+  for (const [, body] of htmlCosts) assert.match(body, /Azure-equivalent cost estimate/);
   const markdown = asMarkdown(result);
   assert.match(markdown, /Azure-equivalent token estimates/);
   assert.match(markdown, /Run 3 \/ Turn 2/);

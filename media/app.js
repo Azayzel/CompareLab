@@ -266,8 +266,8 @@
   }
   function renderUsage(container, report, key) {
     if (!report) return;
-    container.appendChild(metric('Azure-equivalent cost estimate', report.total, report.hint));
     const detail = disclosure(key, 'Per-turn costs and pricing assumptions', 'result-details usage-details');
+    detail.appendChild(metric('Azure-equivalent cost estimate', report.total, report.hint));
     detail.appendChild(make('p', report.note, 'notice'));
     const source = make('a', 'Official Azure pricing');
     source.href = 'https://azure.microsoft.com/en-us/pricing/details/azure-openai/';
