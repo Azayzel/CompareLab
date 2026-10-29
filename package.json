@@ -6,6 +6,10 @@
   "publisher": "azayzel",
   "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Azayzel/CompareLab.git"
+  },
   "engines": { "vscode": "^1.90.0", "node": ">=20" },
   "main": "./src/extension.js",
   "type": "commonjs",
@@ -16,7 +20,9 @@
   },
   "scripts": {
     "test": "node --test",
+    "build": "node scripts/build.js && npm test",
+    "vscode:prepublish": "npm run build",
     "compare": "node bin/comparelab.js",
-    "package": "npx --yes @vscode/vsce package"
+    "package": "npx --yes @vscode/vsce package --no-dependencies --out dist/comparelab.vsix"
   }
 }

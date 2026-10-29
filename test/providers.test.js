@@ -7,6 +7,48 @@ function response(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
+test('endpoint tool rounds normalize OpenAI and Ollama calls and replay tool results', async () => {
+  for (const provider of ['openai', 'ollama']) {
+    const calls = [];
+    const conversation = [{ role: 'user', content: 'Investigate' }];
+    const options = { conversation, tools: [{ name: 'datadog-search_logs', description: 'Search', inputSchema: { type: 'object' } }],
+      fetchImpl: async (_, init) => {
+        calls.push(JSON.parse(init.body));
+        const message = calls.length === 1 ? { content: '', tool_calls: [{ id: 'call-1', type: 'function',
+          function: { name: 'datadog-search_logs', arguments: provider === 'ollama' ? { query: '401' } : '{"query":"401"}' } }] }
+          : { content: 'HTTP 401 increased.' };
+        return response(provider === 'ollama' ? { message } : { choices: [{ message }] });
+      } };
+    const input = { provider, model: 'tool-model', prompt: 'Investigate' };
+    const first = await runModel(input, options);
+    assert.deepEqual(first.toolCalls, [{ callId: 'call-1', name: 'datadog-search_logs', input: { query: '401' } }]);
+    conversation.push({ role: 'assistant', content: '', toolCalls: first.toolCalls },
+      { role: 'tool', toolCallId: 'call-1', content: '401 increased' });
+    const final = await runModel(input, options);
+    assert.equal(final.response, 'HTTP 401 increased.');
+    assert.equal(calls[0].tools[0].function.name, 'datadog-search_logs');
+    assert.equal(calls[1].messages[2][provider === 'ollama' ? 'tool_name' : 'tool_call_id'],
+      provider === 'ollama' ? 'datadog-search_logs' : 'call-1');
+    assert.deepEqual(calls[1].messages[1].tool_calls[0].function.arguments, provider === 'ollama' ? { query: '401' } : '{"query":"401"}');
+  }
+});
+
+test('reserved final requests omit tools for both endpoint providers while retaining their conversation', async () => {
+  for (const provider of ['openai', 'ollama']) {
+    const result = await runModel({ provider, model: 'm', prompt: 'Task' }, {
+      tools: [], conversation: [{ role: 'user', content: 'FINAL ANSWER NOW. No tools are available.' }],
+      fetchImpl: async (_, init) => {
+        const body = JSON.parse(init.body);
+        assert.equal(body.tools, undefined);
+        assert.match(body.messages[0].content, /FINAL ANSWER NOW/);
+        return response(provider === 'ollama' ? { message: { content: 'Limited answer' } } : { choices: [{ message: { content: 'Limited answer' } }] });
+      }
+    });
+    assert.equal(result.response, 'Limited answer');
+    assert.deepEqual(result.toolCalls, []);
+  }
+});
+
 test('Ollama uses native chat, passes explicit context and records usage', async () => {
   let request;
   const result = await runModel({

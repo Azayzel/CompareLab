@@ -4,21 +4,29 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const { compare, asMarkdown, responseContent, resolvePrompt, reviewPacket } = require('./core');
 const { importRun, MAX_IMPORT_BYTES } = require('./traces');
-const { composeAgentTask, createTestPlan, orchestrateTest, summarizeTest } = require('./orchestration');
+const { composeAgentTask, comparisonKind, createTestPlan, orchestrateTest, summarizeTest } = require('./orchestration');
 const { codeMindAlert, agentInstructions } = require('./inputs');
 const { runModel, normalizedEndpoint, DEFAULT_ENDPOINTS } = require('./providers');
+const { createHistory } = require('./history');
+const { asHtml } = require('./html');
+const { usageReport } = require('./usage');
 const { selectEvaluator, selectRunModel, resolveRunModels, runWithVsCode, evaluateWithCopilot, openReviewChat, evaluationKey } = require('./copilot');
+const { selectDatadogTools, runDatadogAgent, DATADOG_AGENT_PROMPT } = require('./datadog');
 
 const secretId = endpoint => 'comparelab:key:' + crypto.createHash('sha256').update(endpoint).digest('hex');
 
 function panelMarkup(side, heading) {
-  return `<section><h2>${heading}</h2>
-    <label for="${side}-model">Model</label><div class="model-choice">
+  return `<section><h2 id="${side}-heading">${heading}</h2>
+    <div id="${side}-modelSettings"><label id="${side}-modelLabel" for="${side}-model">Model</label><div class="model-choice">
     <input id="${side}-model" placeholder="Select a VS Code model" readonly>
-    <button id="${side}-selectModel" type="button">Select model</button></div>
-    <label>Prompt override <textarea id="${side}-prompt" class="prompt-override" rows="2" placeholder="Uses shared prompt"></textarea></label>
-    <label>Response <textarea id="${side}-response" rows="10" placeholder="Paste response or run a model"></textarea></label>
-    <details class="runner"><summary>Run model (optional)</summary>
+    <button id="${side}-selectModel" type="button">Select model</button></div></div>
+    <details id="${side}-promptSection" class="prompt-override-details"><summary>Advanced: saved prompt override</summary>
+    <div class="instruction-heading"><label id="${side}-promptLabel" for="${side}-prompt">Prompt override</label>
+    <button id="${side}-loadInstructions" type="button">Load agent file</button></div>
+    <textarea id="${side}-prompt" class="prompt-override" rows="6" placeholder="Uses shared prompt"></textarea></details>
+    <details class="raw-editor"><summary>Paste / edit raw response</summary>
+    <label>Response <textarea id="${side}-response" rows="6" placeholder="Paste response or run a model"></textarea></label></details>
+    <details id="${side}-runner" class="runner"><summary>Run model (optional)</summary>
       <label>Provider <select id="${side}-provider">
         <option value="vscode">VS Code models</option>
         <option value="manual">Manual / paste output</option>
@@ -34,7 +42,7 @@ function panelMarkup(side, heading) {
         <button id="${side}-run" type="button" class="primary">Run ${heading.toLowerCase()}</button></div>
       <p id="${side}-status" class="runstatus" role="status"></p>
     </details>
-    <details><summary>Model &amp; context details</summary>
+    <details id="${side}-modelDetails"><summary>Model &amp; context details</summary>
       <label>Provider-reported model <input id="${side}-reportedModel" placeholder="From provider, if available"></label>
       <label>Snapshot/version <input id="${side}-modelVersion" placeholder="If available"></label>
       <label>Context-window tokens <input id="${side}-contextWindowTokens" type="number" min="1" placeholder="Unknown"></label>
@@ -60,14 +68,24 @@ function panelHtml(panel, context) {
   <link rel="stylesheet" href="${media('style.css')}"><link rel="stylesheet" href="${media('runners.css')}">
   <title>CompareLab</title></head><body><main>
   <header><div><h1>⇄ CompareLab</h1><p>Visual, context-aware model comparisons.</p></div>
-  <div class="buttons"><button id="import">Import JSON</button><button id="export">Export JSON</button><button id="report">Report</button></div></header>
-  <section class="prompt"><div class="instruction-heading"><label for="prompt">Agent instructions / shared prompt</label>
+  <div id="currentActions" class="buttons"><button id="historySave">Save to history</button><button id="import">Import JSON</button><button id="export">Export JSON</button><button id="report">Markdown report</button><button id="htmlReport">Export HTML</button></div></header>
+  <nav class="view-tabs" role="tablist" aria-label="CompareLab views">
+  <button id="compareTab" role="tab" aria-controls="compareView" aria-selected="true">Model comparison</button>
+  <button id="promptTab" role="tab" aria-controls="compareView" aria-selected="false" tabindex="-1">Prompt comparison</button>
+  <button id="historyTab" role="tab" aria-controls="historyView" aria-selected="false" tabindex="-1">History</button></nav>
+  <section id="compareView" role="tabpanel" aria-labelledby="compareTab">
+  <p id="historySaveStatus" class="runstatus" role="status"></p>
+  <p id="comparisonDescription" class="notice">Compare models using the same instructions and incoming message.</p>
+  <section class="prompt"><div id="sharedInstructions"><div class="instruction-heading"><label for="prompt">Agent instructions / shared prompt</label>
   <button id="loadInstructions" type="button">Load agent file</button></div>
-  <textarea id="prompt" rows="2" placeholder="Enter the prompt shared by both models"></textarea>
+  <textarea id="prompt" rows="2" placeholder="Enter the prompt shared by both models"></textarea></div>
+  <details id="datadogBudgetGuidance"><summary>Investigation instructions (automatically added to End-to-end runs)</summary>
+  <pre class="response-content">${DATADOG_AGENT_PROMPT.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</pre></details>
   <label for="incomingMessage" class="evidence-label">Incoming message / trigger</label>
   <textarea id="incomingMessage" rows="3" placeholder="CodeMind mapped alert, normalized event JSON, or plain message"></textarea>
   <label for="evidence" class="evidence-label">Source evidence / tool results</label>
-  <textarea id="evidence" rows="3" placeholder="Original logs, metrics, references, or expected results"></textarea></section>
+  <textarea id="evidence" rows="3" placeholder="Optional for End-to-end agent; required for Model / prompt only"></textarea>
+  <p id="investigationDescription" class="notice">End-to-end Orchestrate Test lets each model investigate independently with approved Datadog MCP tools. No pasted evidence is required.</p></section>
   <div class="columns">${panelMarkup('a', 'Baseline')}${panelMarkup('b', 'Candidate')}</div>
   <div class="actionbar"><label>Required phrases (comma-separated) <input id="checks" placeholder="e.g. 401, 403"></label>
   <label>Comparison mode <select id="comparisonMode"><option value="end-to-end">End-to-end agent</option>
@@ -82,25 +100,40 @@ function panelHtml(panel, context) {
   <button id="evaluate" type="button" class="primary">Evaluate with Copilot</button>
   <button id="cancelReview" type="button" hidden>Cancel</button></div>
   <p id="reviewStatus" class="runstatus" role="status"></p>
-  <section id="testResults" hidden aria-live="polite"></section>
-  <section id="results" hidden><h2>Quality assessment</h2><div id="evaluation" aria-live="polite"></div>
-  <h2>Responses</h2><div class="readable-responses">
-  <article><h3>Baseline</h3><pre id="baselineContent" class="response-content"></pre></article>
-  <article><h3>Candidate</h3><pre id="candidateContent" class="response-content"></pre></article></div>
-  <details class="result-details"><summary>Raw text diff and phrase checks</summary>
+  <section id="testResults" hidden aria-live="polite" tabindex="-1"></section>
+  <section id="results" hidden tabindex="-1"><h2 class="section-title">Quality review</h2><div id="evaluation" aria-live="polite"></div>
+  <div class="response-section-heading"><h2 id="responseHeading" class="section-title">Model reports</h2>
+  <p id="responseDescription" class="notice">Read the formatted reports, or expand Raw response for the original text.</p></div>
+  <div class="readable-responses">
+  <article id="baselineResponseCard" class="response-card"><div class="model-card-heading"><h3 id="baselineResponseModel"></h3><span id="baselineResponseStatus"></span></div>
+  <p id="baselineResponseRole" class="model-role">Baseline</p><div id="baselineContent" class="response-view"></div></article>
+  <article id="candidateResponseCard" class="response-card"><div class="model-card-heading"><h3 id="candidateResponseModel"></h3><span id="candidateResponseStatus"></span></div>
+  <p id="candidateResponseRole" class="model-role">Candidate</p><div id="candidateContent" class="response-view"></div></article></div>
+  <h2 class="section-title diagnostics-heading">Diagnostics</h2>
+  <details class="result-details"><summary>Text differences and phrase checks</summary>
   <div id="diff" class="diff" aria-label="Inline difference"></div><div id="summary"></div><div id="checksResults"></div></details>
   <details class="result-details"><summary>Run comparability and efficiency</summary>
   <div id="efficiency"></div><div id="fairness"></div></details>
   <details class="result-details"><summary>Execution traces and context provenance</summary><div id="traces"></div></details></section>
+  </section>
+  <section id="historyView" role="tabpanel" aria-labelledby="historyTab" hidden>
+  <div class="history-heading"><div><h2>Comparison history</h2><p id="historyUsage" class="notice"></p></div>
+  <div class="buttons"><button id="historyRefresh">Refresh</button><button id="historyClear">Clear history</button></div></div>
+  <p class="notice">Shared across workspaces in this VS Code profile. Stored outside your repository, not synced by CompareLab.
+  History contains prompts, responses, and retained evidence. Oldest entries are removed beyond 50 entries or 100 MiB; export important comparisons.</p>
+  <p class="notice">Opening an entry loads an editable copy in Compare without rerunning models. Editing it never overwrites the saved entry.</p>
+  <p id="historyStatus" class="runstatus" role="status"></p><div id="historyList"></div></section>
   <footer>VS Code model runs use your configured model access. Evaluation sends the supplied task, evidence, and responses through your Copilot access.
   Invalid citations may trigger one extra correction request.
   Chat opens a draft for review before sending.
   Other model requests go only to the endpoint you explicitly run.
   API keys stay in VS Code SecretStorage; prompts and responses can be sensitive when exported.</footer>
-  </main><script nonce="${nonce}" src="${media('app.js')}"></script></body></html>`;
+  </main><script nonce="${nonce}" src="${media('markdown.js')}"></script>
+  <script nonce="${nonce}" src="${media('app.js')}"></script></body></html>`;
 }
 
 function activate(context) {
+  const history = createHistory(path.join(context.globalStorageUri.fsPath, 'comparison-history'));
   context.subscriptions.push(vscode.commands.registerCommand('comparelab.open', () => {
     const panel = vscode.window.createWebviewPanel('comparelab', 'CompareLab', vscode.ViewColumn.One, {
       enableScripts: true, retainContextWhenHidden: true,
@@ -111,6 +144,7 @@ function activate(context) {
     let evaluation = null;
     let reviewCancellation;
     let disposed = false;
+    let historyWorking = false;
     context.subscriptions.push(panel.onDidDispose(() => {
       disposed = true;
       reviewCancellation?.cancel();
@@ -119,12 +153,70 @@ function activate(context) {
     function comparison(input) {
       const result = compare(input);
       result.content = { baseline: responseContent(result.baseline.response), candidate: responseContent(result.candidate.response) };
-      result.evaluation = evaluation?.inputFingerprint === evaluationKey(input) ? evaluation : null;
+      const key = evaluationKey({ ...input, evidence: result.evidence });
+      result.evaluation = evaluation?.inputFingerprint === key ? evaluation : null;
       if (!result.evaluation && result.testRun) {
-        const pair = result.testRun.pairs.findLast(pair => pair.evaluation?.inputFingerprint === evaluationKey(input));
+        const pair = result.testRun.pairs.findLast(pair => pair.evaluation?.inputFingerprint === key);
         result.evaluation = pair?.evaluation ?? null;
       }
+      if (result.evaluation) result.evaluation = { ...result.evaluation, usage: usageReport(result.evaluation.usageTurns || []) };
       return result;
+    }
+
+    async function saveHistory(input, revision) {
+      const result = comparison(input);
+      if (!result.testRun && !result.baseline.response.trim() && !result.candidate.response.trim()) {
+        throw new Error('Add at least one model response before saving a comparison to history.');
+      }
+      const saved = await history.save({ ...input, testRun: result.testRun }, result.evaluation);
+      if (!disposed) await panel.webview.postMessage({ type: 'historySaved', entry: saved.entry, revision,
+        message: 'Saved to history.' + (saved.removed ? ' Removed ' + saved.removed + ' oldest entries to stay within the history limits.' : '') });
+    }
+
+    async function handleHistory(msg) {
+      const mutating = msg.type !== 'historyList';
+      if (mutating && (running || historyWorking)) {
+        await panel.webview.postMessage({ type: 'historyError', message: 'Wait for the current operation to finish before changing history.' });
+        return;
+      }
+      if (mutating) {
+        historyWorking = true;
+        await panel.webview.postMessage({ type: 'historyBusy', value: true });
+      }
+      try {
+        if (msg.type === 'historySave') await saveHistory(msg.experiment, msg.revision);
+        else if (msg.type === 'historyOpen') {
+          const snapshot = await history.get(msg.id);
+          compare(snapshot.experiment);
+          const choice = await vscode.window.showWarningMessage(
+            'Open this saved comparison? This replaces the current form. Save or export any changes you want to keep first.',
+            { modal: true }, 'Open comparison');
+          if (choice !== 'Open comparison' || disposed) return;
+          if (running) throw new Error('A run started while opening history. Open the comparison again after it finishes.');
+          evaluation = snapshot.evaluation;
+          await panel.webview.postMessage({ type: 'historyOpened', experiment: snapshot.experiment, savedAt: snapshot.savedAt });
+          return;
+        } else if (msg.type === 'historyDelete' || msg.type === 'historyClear') {
+          const all = msg.type === 'historyClear';
+          const label = all ? 'Clear history' : 'Delete comparison';
+          const choice = await vscode.window.showWarningMessage(all
+            ? 'Delete all saved comparisons in this profile? Exported files and the current form will not be changed.'
+            : 'Delete this saved comparison? Exported files and the current form will not be changed.', { modal: true }, label);
+          if (choice !== label || disposed) return;
+          if (all) await history.clear();
+          else await history.delete(msg.id);
+          await panel.webview.postMessage({ type: 'historyStatus', message: all ? 'History cleared.' : 'Saved comparison deleted.' });
+        } else if (msg.type !== 'historyList') throw new Error('Unknown history action.');
+        if (!disposed) await panel.webview.postMessage({ type: 'historyList', ...await history.list() });
+      } catch (error) {
+        if (!disposed) await panel.webview.postMessage({ type: 'historyError', message: error.message });
+        vscode.window.showErrorMessage('CompareLab history: ' + error.message);
+      } finally {
+        if (mutating) {
+          historyWorking = false;
+          if (!disposed) await panel.webview.postMessage({ type: 'historyBusy', value: false });
+        }
+      }
     }
 
     async function modelKey(variant) {
@@ -141,6 +233,7 @@ function activate(context) {
     }
 
     async function runSide(input, side) {
+      comparisonKind(input);
       const variant = side === 'a' ? input.baseline : input.candidate;
       if (!variant) throw new Error('Missing variant ' + side);
       const provider = variant.provider || 'vscode';
@@ -167,10 +260,14 @@ function activate(context) {
       const cancellation = reviewCancellation.token.onCancellationRequested(() => controller.abort());
       await panel.webview.postMessage({ type: 'busy', value: true, kind: 'test' });
       try {
-        const generationModels = await resolveRunModels(vscode, { baseline: plan.baseline, candidate: plan.candidate });
+        const generationModels = await resolveRunModels(vscode, { baseline: plan.baseline, candidate: plan.candidate },
+          { requireTools: plan.comparisonMode === 'end-to-end' });
         const keys = { baseline: await modelKey(plan.baseline), candidate: await modelKey(plan.candidate) };
         const model = await selectEvaluator(vscode);
         if (!model || disposed || reviewCancellation.token.isCancellationRequested) return;
+        const toolSelection = plan.comparisonMode === 'end-to-end' ? await selectDatadogTools(vscode) : undefined;
+        const tools = toolSelection?.tools;
+        if (plan.comparisonMode === 'end-to-end' && (!tools || disposed || reviewCancellation.token.isCancellationRequested)) return;
         const record = await vscode.window.withProgress({ title: 'CompareLab: Orchestrate Test',
           location: vscode.ProgressLocation.Notification, cancellable: true }, async (progress, token) => {
           const listener = token.onCancellationRequested(() => reviewCancellation.cancel());
@@ -178,9 +275,24 @@ function activate(context) {
           try {
             return await orchestrateTest(input, {
               signal: controller.signal, comparePair: compare,
-              runVariant: (variant, side, signal) => variant.provider === 'vscode'
-                ? runWithVsCode(vscode, variant, generationModels[side], reviewCancellation.token)
-                : runModel(variant, { apiKey: keys[side], signal }),
+              runVariant: (variant, side, signal) => {
+                if (!tools) return variant.provider === 'vscode'
+                  ? runWithVsCode(vscode, variant, generationModels[side], reviewCancellation.token)
+                  : runModel(variant, { apiKey: keys[side], signal });
+                return runDatadogAgent(vscode, variant, tools, (conversation, tools, token) => {
+                  if (variant.provider === 'vscode') return runWithVsCode(vscode, variant, generationModels[side], token, { conversation, tools });
+                  const child = new AbortController();
+                  const listener = token.onCancellationRequested(() => child.abort());
+                  if (token.isCancellationRequested) child.abort();
+                  return runModel(variant, { apiKey: keys[side], signal: child.signal, conversation, tools }).finally(() => listener.dispose());
+                }, reviewCancellation.token, message => {
+                  progress.report({ message: side + ': ' + message });
+                  panel.webview.postMessage({ type: 'reviewStatus', message: side + ': ' + message });
+                }, toolSelection.approvedReadOnlyTools).catch(error => {
+                  if (error instanceof vscode.CancellationError) reviewCancellation.cancel();
+                  throw error;
+                });
+              },
               evaluatePair: async (pairInput, number) => {
                 const child = new vscode.CancellationTokenSource();
                 const parent = reviewCancellation.token.onCancellationRequested(() => child.cancel());
@@ -208,14 +320,25 @@ function activate(context) {
             });
           } finally { listener.dispose(); }
         });
-        if (!disposed) {
+        if (record) {
           const pair = record.pairs.findLast(pair => pair.baseline.status === 'succeeded' && pair.candidate.status === 'succeeded') || record.pairs.at(-1);
           const instructions = plan.instructions ?? plan.task;
-          const variant = side => ({ ...pair?.[side]?.result, ...plan[side], prompt: instructions, response: pair?.[side]?.result?.response || '' });
-          await panel.webview.postMessage({ type: 'testFinished', experiment: { prompt: instructions, incomingMessage: plan.incomingMessage || '', evidence: plan.evidence,
-            comparisonMode: 'model-prompt-only', baseline: variant('baseline'), candidate: variant('candidate'),
-            review: plan.review, checks: plan.checks, test: { repetitions: plan.repetitions }, testRun: record } });
-          await panel.webview.postMessage({ type: 'reviewStatus', message: 'Controlled test ' + record.status + '.' });
+          const variant = side => ({ ...pair?.[side]?.result, ...plan[side], prompt: plan.prompts?.[side] ?? instructions,
+            response: pair?.[side]?.result?.response || '' });
+          const completed = { prompt: instructions, incomingMessage: plan.incomingMessage || '', evidence: plan.evidence,
+            comparisonMode: plan.comparisonMode || 'model-prompt-only', baseline: variant('baseline'), candidate: variant('candidate'),
+            review: plan.review, checks: plan.checks, test: { repetitions: plan.repetitions }, testRun: record };
+          if (plan.comparisonKind) completed.comparisonKind = plan.comparisonKind;
+          if (!disposed) await panel.webview.postMessage({ type: 'testFinished', experiment: completed });
+          try { await saveHistory(completed); }
+          catch (error) {
+            const message = 'The test finished, but its history save failed: ' + error.message + ' Export JSON to keep a copy.';
+            if (!disposed) await panel.webview.postMessage({ type: 'historyError', message });
+            vscode.window.showErrorMessage('CompareLab: ' + message);
+          }
+          const limited = record.pairs.some(pair => ['baseline', 'candidate'].some(side => pair[side].result?.investigationBudget?.limited));
+          if (!disposed) await panel.webview.postMessage({ type: 'reviewStatus', message: 'Controlled test ' + record.status +
+            (limited ? ' with budget-limited investigations. Inspect the run warnings.' : '.') });
         }
       } finally {
         cancellation.dispose();
@@ -227,6 +350,7 @@ function activate(context) {
     }
 
     panel.webview.onDidReceiveMessage(async msg => {
+      if (typeof msg.type === 'string' && msg.type.startsWith('history')) { await handleHistory(msg); return; }
       try {
         if (msg.type === 'cancelReview') { reviewCancellation?.cancel(); return; }
         if (running && ['selectModel', 'loadInstructions', 'orchestrate', 'evaluate', 'chat', 'run', 'runBoth', 'import', 'setKey'].includes(msg.type)) return;
@@ -247,7 +371,8 @@ function activate(context) {
             if (!disposed) await panel.webview.postMessage({ type: 'busy', value: false });
           }
         } else if (msg.type === 'evaluate') {
-          reviewPacket(msg.experiment);
+          const reviewInput = msg.experiment.testRun ? { ...msg.experiment, evidence: compare(msg.experiment).evidence } : msg.experiment;
+          reviewPacket(reviewInput);
           running = true;
           evaluation = null;
           await panel.webview.postMessage({ type: 'busy', value: true, kind: 'evaluation' });
@@ -268,7 +393,7 @@ function activate(context) {
               const listener = token.onCancellationRequested(() => reviewCancellation.cancel());
               if (token.isCancellationRequested) reviewCancellation.cancel();
               try {
-                return await evaluateWithCopilot(vscode, msg.experiment, model, reviewCancellation.token, message => {
+                return await evaluateWithCopilot(vscode, reviewInput, model, reviewCancellation.token, message => {
                   progress.report({ message });
                   panel.webview.postMessage({ type: 'reviewStatus', message });
                 });
@@ -293,7 +418,8 @@ function activate(context) {
             if (!disposed) await panel.webview.postMessage({ type: 'busy', value: false });
           }
         } else if (msg.type === 'chat') {
-          await openReviewChat(vscode, msg.experiment);
+          const reviewInput = msg.experiment.testRun ? { ...msg.experiment, evidence: compare(msg.experiment).evidence } : msg.experiment;
+          await openReviewChat(vscode, reviewInput);
           await panel.webview.postMessage({ type: 'reviewStatus', message: 'New Copilot Chat draft opened. No message was submitted.' });
         } else if (msg.type === 'export') {
           const uri = await vscode.window.showSaveDialog({ filters: { JSON: ['json'] }, saveLabel: 'Export experiment' });
@@ -306,7 +432,7 @@ function activate(context) {
             if (bytes.byteLength > 600000) throw new Error('Agent instructions exceed the 150,000-character limit.');
             const prompt = Buffer.from(bytes).toString('utf8');
             if (prompt.length > 150000) throw new Error('Agent instructions exceed the 150,000-character limit.');
-            await panel.webview.postMessage({ type: 'instructionsLoaded', prompt });
+            await panel.webview.postMessage({ type: 'instructionsLoaded', prompt, ...(['a', 'b'].includes(msg.side) ? { side: msg.side } : {}) });
           }
         } else if (msg.type === 'import') {
           const files = await vscode.window.showOpenDialog({ canSelectMany: false, filters: { JSON: ['json'] } });
@@ -328,6 +454,15 @@ function activate(context) {
         } else if (msg.type === 'report') {
           const uri = await vscode.window.showSaveDialog({ filters: { Markdown: ['md'] }, saveLabel: 'Save comparison report' });
           if (uri) await vscode.workspace.fs.writeFile(uri, Buffer.from(asMarkdown(comparison(msg.experiment))));
+        } else if (msg.type === 'htmlReport') {
+          const uri = await vscode.window.showSaveDialog({ filters: { HTML: ['html'] }, saveLabel: 'Export styled HTML report' });
+          if (uri) {
+            const assets = await Promise.all(['style.css', 'runners.css', 'markdown.js'].map(file =>
+              vscode.workspace.fs.readFile(vscode.Uri.joinPath(context.extensionUri, 'media', file))));
+            const html = asHtml(comparison(msg.experiment), { css: assets.slice(0, 2).map(bytes => Buffer.from(bytes).toString('utf8')).join('\n'),
+              markdownScript: Buffer.from(assets[2]).toString('utf8') });
+            await vscode.workspace.fs.writeFile(uri, Buffer.from(html));
+          }
         } else if (msg.type === 'setKey') {
           if (!['a', 'b'].includes(msg.side)) return;
           const variant = msg.side === 'a' ? msg.experiment.baseline : msg.experiment.candidate;

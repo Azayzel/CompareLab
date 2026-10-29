@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { composeAgentTask, createTestPlan, orchestrateTest, summarizeTest, validateTestRecord } = require('../src/orchestration');
+const { composeAgentTask, createTestPlan, pairEvidence, orchestrateTest, summarizeTest, validateTestRecord } = require('../src/orchestration');
 const { compare } = require('../src/core');
 const { codeMindAlert } = require('../src/inputs');
 
@@ -33,6 +33,54 @@ test('controlled test rejects missing evidence, invalid providers, and mismatche
   assert.throws(() => createTestPlan({ ...input, candidate: { ...input.candidate, maxOutputTokens: -1 } }), /Output cap/);
   assert.throws(() => createTestPlan({ ...input, candidate: { ...input.candidate, temperature: 4 } }), /Temperature/);
   for (const repetitions of [0, 6, 1.5, 'invalid']) assert.throws(() => createTestPlan({ ...input, test: { repetitions } }), /paired runs/);
+});
+
+test('end-to-end plans do not require evidence and do not claim live tools are unavailable', () => {
+  const input = { ...experiment(), comparisonMode: 'end-to-end', evidence: '' };
+  const plan = createTestPlan(input);
+  assert.equal(plan.comparisonMode, 'end-to-end');
+  assert.equal(plan.investigationMode, 'full-agent');
+  assert.equal(plan.evidence, '');
+  assert.match(plan.requestPrompt, /approved Datadog MCP tools/);
+  assert.match(plan.requestPrompt, /targeted list_datadog_skills query/);
+  assert.match(plan.requestPrompt, /required telemetry/);
+  assert.doesNotMatch(plan.requestPrompt, /No live tools are available/);
+  assert.doesNotMatch(plan.requestPrompt, /at most 8|reserve the final request/);
+  assert.throws(() => createTestPlan({ ...input, comparisonMode: 'model-prompt-only' }), /requires Source evidence/);
+  const alertPlan = createTestPlan({ ...input, incomingMessage: '{"eventId":"123","monitorId":"456"}' });
+  assert.match(alertPlan.systemPrompt, /approved Datadog MCP tools/);
+  assert.match(alertPlan.requestPrompt, /Supplied reference evidence/);
+});
+
+test('end-to-end results require real tool evidence before review and validate on import', async () => {
+  const input = { ...experiment(), comparisonMode: 'end-to-end', evidence: '', test: { repetitions: 1 } };
+  const runner = runners();
+  const generate = runner.runVariant;
+  const failed = await orchestrateTest(input, runner);
+  assert.equal(failed.status, 'partial');
+  assert.equal(runner.reviews.length, 0);
+  assert.match(failed.pairs[0].baseline.error, /valid Datadog MCP evidence/);
+  runner.runVariant = async (input, side) => ({ ...await generate(input, side),
+    toolEvidence: [{ tool: 'datadog-search_logs', input: { query: side }, collectedAt: new Date().toISOString(), content: side + ' logs' }] });
+  const record = await orchestrateTest(input, runner);
+  assert.equal(record.status, 'completed');
+  assert.deepEqual(validateTestRecord(record), record);
+  assert.match(runner.reviews[0].evidence, /baseline logs/);
+  assert.match(runner.reviews[0].evidence, /candidate logs/);
+  assert.equal(summarizeTest(record).preference, 'candidate');
+  const tampered = structuredClone(record);
+  tampered.pairs[0].baseline.result.toolEvidence = [];
+  assert.throws(() => validateTestRecord(tampered), /Invalid controlled-test record/);
+  const guide = { tool: 'mcp_observability_load_datadog_skill', input: { skill_name: 'datadog/logs' },
+    collectedAt: new Date().toISOString(), content: 'GUIDANCE_ONLY: use valid query syntax' };
+  record.pairs[0].baseline.result.toolEvidence.unshift(guide);
+  assert.deepEqual(validateTestRecord(record), record);
+  assert.doesNotMatch(pairEvidence(record.plan, record.pairs[0]), /GUIDANCE_ONLY/);
+  assert.match(pairEvidence(record.plan, record.pairs[0]), /baseline logs/);
+  tampered.pairs[0].baseline.result.toolEvidence = [guide];
+  assert.throws(() => validateTestRecord(tampered), /Invalid controlled-test record/);
+  record.pairs[0].baseline.result.toolEvidence[1].tool = 'mcp_observability_aggregate_spans';
+  assert.deepEqual(validateTestRecord(record), record);
 });
 
 function runners(options = {}) {
@@ -184,4 +232,119 @@ test('VS Code plans require no endpoints and reject unsupported generation param
   assert.equal(plan.baseline.endpoint, undefined);
   assert.equal(plan.candidate.temperature, null);
   assert.throws(() => createTestPlan({ ...input, candidate: { ...input.candidate, temperature: 0.5 } }), /VS Code manages generation settings/);
+});
+
+test('full-agent records retain more than eight queries and 50,000 evidence characters through import', async () => {
+  const input = { ...experiment(), comparisonMode: 'end-to-end', evidence: '', test: { repetitions: 1 } };
+  const runner = runners();
+  runner.runVariant = async input => ({ ...input, response: 'Answer.', elapsedMs: 20,
+    estimatedInputTokens: 123, estimatedOutputTokens: 45, inputTokens: null, outputTokens: null,
+    toolEvidence: Array.from({ length: 10 }, () => ({ tool: 'datadog-search_datadog_logs', input: { query: '401' },
+      collectedAt: new Date().toISOString(), content: 'x'.repeat(7000) })) });
+  const record = await orchestrateTest(input, runner);
+  assert.equal(record.status, 'completed');
+  const saved = JSON.parse(JSON.stringify(record));
+  assert.deepEqual(validateTestRecord(saved), saved);
+  const summary = summarizeTest(record);
+  assert.equal(summary.metrics.baseline.estimatedInputTokens, 123);
+  assert.equal(summary.metrics.baseline.estimatedOutputTokens, 45);
+  assert.equal(summary.metrics.baseline.inputTokens, null);
+});
+
+test('historical budget-limited records keep their original fingerprints, warnings, and evidence on reopen', async () => {
+  const { DATADOG_LIMITS } = require('../src/datadog');
+  const input = { ...experiment(), comparisonMode: 'end-to-end', evidence: '', test: { repetitions: 1 } };
+  const runner = runners();
+  runner.runVariant = async input => ({ ...input, response: 'Limited answer.', toolEvidence: [{
+    tool: 'datadog-search_datadog_logs', input: { query: '401' }, collectedAt: new Date().toISOString(),
+    content: 'HTTP 401', truncated: true, originalCharacters: 10000, retainedCharacters: 8
+  }] });
+  const record = await orchestrateTest(input, runner);
+  record.plan = createTestPlan(input, { legacyBudget: true });
+  assert.equal(record.plan.investigationMode, undefined);
+  for (const side of ['baseline', 'candidate']) {
+    const result = record.pairs[0][side].result;
+    result.prompt = record.plan.requestPrompt;
+    result.investigationBudget = { limits: DATADOG_LIMITS, modelRequests: 2, toolCalls: 1, skippedToolCalls: 0,
+      evidenceCharacters: JSON.stringify(result.toolEvidence).length, limited: true, reasons: ['Tool result was truncated.'] };
+  }
+  assert.deepEqual(validateTestRecord(record), record);
+  const displayed = { ...input, testRun: record,
+    baseline: { ...record.plan.baseline, response: 'Limited answer.' },
+    candidate: { ...record.plan.candidate, response: 'Limited answer.' } };
+  assert.ok(compare(displayed).testRun, 'Reopening a historical record must not silently drop it');
+  assert.equal(compare({ ...displayed, prompt: 'Edited task' }).testRun, null);
+  const summary = summarizeTest(record);
+  assert.equal(summary.preference, 'inconclusive');
+  assert.equal(summary.counts.unresolved, 1);
+  assert.match(summary.warnings.join(' '), /truncated/);
+  for (const corrupt of [
+    result => { result.toolEvidence[0].retainedCharacters++; },
+    result => { result.investigationBudget.evidenceCharacters++; },
+    result => { result.investigationBudget.toolCalls = 9; },
+    result => { result.investigationBudget.limited = false; }
+  ]) {
+    const altered = structuredClone(record);
+    corrupt(altered.pairs[0].baseline.result);
+    assert.throws(() => validateTestRecord(altered), /Invalid controlled-test record/);
+  }
+});
+
+test('prompt tests hold model settings fixed, send each exact prompt, and retain correct review tasks through import', async () => {
+  const input = { prompt: '', incomingMessage: 'Alert 123', evidence: 'HTTP 401 increased.', comparisonKind: 'prompt',
+    test: { repetitions: 2 }, baseline: { provider: 'ollama', model: 'shared-model', prompt: 'Investigate {{alert}}.' },
+    candidate: { provider: 'ollama', model: 'shared-model', prompt: 'Verify authentication for {{alert}}.' } };
+  const runner = runners();
+  const record = await orchestrateTest(input, runner);
+  assert.equal(record.status, 'completed');
+  assert.equal(record.plan.comparisonKind, 'prompt');
+  assert.equal(record.plan.prompts.baseline, input.baseline.prompt);
+  assert.equal(record.plan.prompts.candidate, input.candidate.prompt);
+  for (const { input: request, side } of runner.calls) {
+    assert.equal(request.model, 'shared-model');
+    assert.match(request.prompt, side === 'baseline' ? /Investigate Alert 123/ : /Verify authentication for Alert 123/);
+    assert.doesNotMatch(request.prompt, side === 'baseline' ? /Verify authentication/ : /Investigate Alert 123/);
+  }
+  for (const review of runner.reviews) {
+    assert.equal(review.comparisonKind, 'prompt');
+    assert.equal(review.baseline.prompt, input.baseline.prompt);
+    assert.equal(review.candidate.prompt, input.candidate.prompt);
+  }
+  assert.equal(summarizeTest(record).preference, 'candidate');
+  assert.deepEqual(validateTestRecord(record), record);
+  const pair = record.pairs.at(-1);
+  const displayed = { ...input, testRun: record,
+    baseline: { ...record.plan.baseline, prompt: input.baseline.prompt, response: pair.baseline.result.response },
+    candidate: { ...record.plan.candidate, prompt: input.candidate.prompt, response: pair.candidate.result.response } };
+  assert.ok(compare(displayed).testRun);
+  assert.ok(!compare(displayed).fairness.warnings.some(warning => warning.code === 'prompt-variation'));
+  assert.equal(compare({ ...displayed, candidate: { ...displayed.candidate, prompt: 'Edited instructions' } }).testRun, null);
+  const altered = structuredClone(record);
+  altered.plan.requests.candidate.prompt = 'Altered request';
+  assert.throws(() => validateTestRecord(altered), /Invalid controlled-test record/);
+  for (const changed of [{ model: 'other' }, { temperature: 0.5 }, { provider: 'openai' }, { endpoint: 'http://localhost:9999' }]) {
+    const invalid = { ...input, candidate: { ...input.candidate, ...changed } };
+    assert.throws(() => createTestPlan(invalid), /one shared model/);
+    assert.throws(() => compare(invalid), /one shared model/);
+  }
+  assert.throws(() => createTestPlan({ ...input, candidate: { ...input.candidate, prompt: '' } }), /candidate prompt/);
+});
+
+test('prompt-specific agent instructions remain separate system messages for normalized alerts', async () => {
+  const input = { prompt: '', comparisonKind: 'prompt', comparisonMode: 'end-to-end', evidence: '',
+    incomingMessage: '{"eventId":"123","monitorId":"456"}', test: { repetitions: 1 },
+    baseline: { provider: 'ollama', model: 'shared', prompt: 'Baseline agent instructions' },
+    candidate: { provider: 'ollama', model: 'shared', prompt: 'Candidate agent instructions' } };
+  const requests = [];
+  const record = await orchestrateTest(input, { ...runners(), runVariant: async (request, side) => {
+    requests.push(request);
+    assert.match(request.systemPrompt, side === 'baseline' ? /^Baseline agent instructions/ : /^Candidate agent instructions/);
+    assert.match(request.prompt, /^Analyze this Datadog alert event:/);
+    return { ...request, response: side + ' answer', toolEvidence: [{
+      tool: 'datadog-search_datadog_logs', input: { query: side }, content: 'HTTP 401', collectedAt: new Date().toISOString()
+    }] };
+  } });
+  assert.equal(record.status, 'completed');
+  assert.equal(requests.length, 2);
+  assert.deepEqual(validateTestRecord(record), record);
 });

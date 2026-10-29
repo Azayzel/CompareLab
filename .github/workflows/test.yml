@@ -11,15 +11,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Check JavaScript syntax
-        run: |
-          node --check src/core.js
-          node --check src/providers.js
-          node --check src/copilot.js
-          node --check src/orchestration.js
-          node --check src/inputs.js
-          node --check src/extension.js
-          node --check media/app.js
-          node --check bin/comparelab.js
-      - name: Run tests
-        run: node --test
+      - name: Validate extension source and run tests
+        run: npm run build

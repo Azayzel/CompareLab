@@ -7,21 +7,23 @@ CompareLab should remain small, legible, and local-first. Prefer focused changes
 1. Install **Node.js 20+** and **VS Code 1.90+**.
 2. Clone the repository and open it in VS Code.
 3. Press **F5** for the Extension Development Host.
-4. Run the test and syntax checks:
+4. Validate all JavaScript, required extension assets, and tests:
 
 ```sh
-node --test
-node --check src/core.js
-node --check src/providers.js
-node --check src/copilot.js
-node --check src/orchestration.js
-node --check src/inputs.js
-node --check src/extension.js
-node --check media/app.js
-node --check bin/comparelab.js
+npm run build
 ```
 
-The extension has no third-party runtime packages or build step. The optional `npm run package` script invokes `@vscode/vsce` through `npx` and may require internet access.
+The extension has no third-party runtime packages and needs no transpilation or bundling. `npm run build` checks JavaScript syntax under `src/`, `media/`, `bin/`, `scripts/`, and `test/`, verifies required assets, prepares `dist/`, and runs the test suite. It requires no npm downloads. CI uses this same command; use `npm test` for tests alone.
+
+To produce an installable extension:
+
+```sh
+npm run package
+```
+
+This invokes the standard `@vscode/vsce` packager through `npx`. Its `vscode:prepublish` hook runs the build and tests before packaging, and the output is `dist/comparelab.vsix`. The packager requires approved npm registry access and a Node version supported by the resolved tool version; its version is not pinned. The extension itself retains its Node.js 20+ requirement. No Marketplace publishing or credentials are needed for local packaging.
+
+The `.vscodeignore` allowlist includes only the manifest, README, license, runtime source, and webview assets. Keep this list in sync when adding runtime files outside `src/` or `media/`. Tests, examples, local exports, editor configuration, and generated packages must not enter the VSIX. See [Build and package](README.md#build-and-package) for installation and registry-access troubleshooting.
 
 ## Code boundaries
 

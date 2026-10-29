@@ -1,6 +1,7 @@
 'use strict';
 const { validateTrace, summarizeTrace, traceDifferences } = require('./traces');
-const { composeAgentTask, createTestPlan, validateTestRecord, summarizeTest } = require('./orchestration');
+const { composeAgentTask, comparisonKind, createTestPlan, pairEvidence, validateTestRecord, summarizeTest } = require('./orchestration');
+const { validateUsageTurns, usageReport } = require('./usage');
 
 /**
  * Shared, dependency-free engine for the VS Code extension and CLI.
@@ -56,6 +57,7 @@ function resolvePrompt(sharedPrompt, override) {
 }
 
 function reviewPacket(input, reversed = false) {
+  comparisonKind(input);
   const packet = {
     taskA: composeAgentTask(resolvePrompt(input.prompt, input.baseline?.prompt), input.incomingMessage),
     taskB: composeAgentTask(resolvePrompt(input.prompt, input.candidate?.prompt), input.incomingMessage),
@@ -200,6 +202,7 @@ function intOrNull(value) {
 }
 
 function describeVariant(input = {}) {
+  const usageTurns = validateUsageTurns(input.usageTurns);
   return {
     model: String(input.model || 'Unspecified model'),
     reportedModel: input.reportedModel ? String(input.reportedModel) : null,
@@ -212,6 +215,7 @@ function describeVariant(input = {}) {
     contextWindowSource: String(input.contextWindowSource || 'unverified'),
     inputTokens: intOrNull(input.inputTokens),
     estimatedInputTokens: intOrNull(input.estimatedInputTokens),
+    estimatedOutputTokens: intOrNull(input.estimatedOutputTokens),
     outputTokens: intOrNull(input.outputTokens),
     maxOutputTokens: intOrNull(input.maxOutputTokens),
     finishReason: input.finishReason ? String(input.finishReason) : null,
@@ -221,11 +225,12 @@ function describeVariant(input = {}) {
     runId: input.runId ? String(input.runId) : null,
     responseRedacted: input.responseRedacted === true,
     responseTruncated: input.responseTruncated === true,
-    executionTrace: validateTrace(input.executionTrace)
+    executionTrace: validateTrace(input.executionTrace),
+    usageTurns, usage: usageReport(usageTurns || [])
   };
 }
 
-function assessFairness(a, b, comparisonMode = 'end-to-end', hasFrozenTestInputs = false) {
+function assessFairness(a, b, comparisonMode = 'end-to-end', hasFrozenTestInputs = false, kind = 'model') {
   const warnings = [];
   const unknowns = [];
   const add = (code, message, severity = 'caution') => warnings.push({ code, message, severity });
@@ -257,7 +262,7 @@ function assessFairness(a, b, comparisonMode = 'end-to-end', hasFrozenTestInputs
       add('context-overrun', name + ' token usage exceeds its recorded context window', 'high');
     }
   }
-  if (a.prompt !== b.prompt) {
+  if (a.prompt !== b.prompt && kind !== 'prompt') {
     add('prompt-variation', 'The prompts differ; do not attribute the result solely to model differences');
   }
   if (a.contextWindowTokens && b.contextWindowTokens && a.contextWindowTokens !== b.contextWindowTokens) {
@@ -280,7 +285,8 @@ function assessFairness(a, b, comparisonMode = 'end-to-end', hasFrozenTestInputs
   return {
     status: limited ? 'limited' : (warnings.length ? 'caution' : unknowns.length ? 'unverified' : 'comparable'),
     warnings, unknowns,
-    note: 'Context-window size alone does not make a result fair. Unknown tool, system, retrieval, and hidden token overhead can affect actual effective context. This assessment is not a quality grade.'
+    note: (kind === 'prompt' ? 'Prompt comparison intentionally varies instructions while holding model settings fixed. ' : '') +
+      'Context-window size alone does not make a result fair. Unknown tool, system, retrieval, and hidden token overhead can affect actual effective context. This assessment is not a quality grade.'
   };
 }
 
@@ -296,27 +302,34 @@ function evaluateChecks(a, b, checks = {}) {
 function compare(input) {
   if (!input || typeof input !== 'object') throw new TypeError('Experiment must be an object');
   if (input.kind === 'codemind-agent-run') throw new Error('Import single CodeMind runs into Baseline or Candidate before comparing a two-variant experiment.');
+  const kind = comparisonKind(input);
   const baseline = describeVariant({ ...input.baseline, prompt: composeAgentTask(resolvePrompt(input.prompt, input.baseline?.prompt), input.incomingMessage) });
   const candidate = describeVariant({ ...input.candidate, prompt: composeAgentTask(resolvePrompt(input.prompt, input.candidate?.prompt), input.incomingMessage) });
   const spans = diffText(baseline.response, candidate.response);
   const comparisonMode = input.comparisonMode || 'end-to-end';
   if (!['end-to-end', 'model-prompt-only'].includes(comparisonMode)) throw new Error('Unsupported comparison mode');
   let testRun = validateTestRecord(input.testRun);
+  let evidence = String(input.evidence || '');
   if (testRun) {
-    try { if (createTestPlan(input).inputFingerprint !== testRun.plan.inputFingerprint) testRun = null; }
+    try {
+      if (createTestPlan(input, { legacyBudget: testRun.plan.comparisonMode === 'end-to-end' &&
+          testRun.plan.investigationMode === undefined }).inputFingerprint !== testRun.plan.inputFingerprint) testRun = null;
+    }
     catch { testRun = null; }
     if (testRun) {
       const selectedPair = testRun.pairs.findLast(pair => pair.baseline.status === 'succeeded' && pair.candidate.status === 'succeeded') || testRun.pairs.at(-1);
       if (['baseline', 'candidate'].some(side => String(input[side]?.response || '') !== (selectedPair?.[side]?.result?.response || ''))) testRun = null;
+      else if (selectedPair) evidence = pairEvidence(testRun.plan, selectedPair);
     }
   }
   return {
     schemaVersion: 1,
     comparisonMode,
+    comparisonKind: kind,
     testRun, testSummary: testRun ? summarizeTest(testRun) : null,
     baseline, candidate,
     incomingMessage: String(input.incomingMessage || ''),
-    evidence: String(input.evidence || ''),
+    evidence,
     spans,
     measures: {
       baselineWords: countWords(baseline.response),
@@ -324,7 +337,7 @@ function compare(input) {
       changedWordDelta: countWords(candidate.response) - countWords(baseline.response),
       interpretation: 'Text counts and diffs measure change, not correctness or quality.'
     },
-    fairness: assessFairness(baseline, candidate, comparisonMode, testRun !== null),
+    fairness: assessFairness(baseline, candidate, comparisonMode, testRun !== null, kind),
     traces: { baseline: summarizeTrace(baseline.executionTrace), candidate: summarizeTrace(candidate.executionTrace) },
     checks: evaluateChecks(baseline, candidate, input.checks || {})
   };
@@ -342,18 +355,34 @@ function asMarkdown(result) {
       ', unresolved ' + summary.counts.unresolved + ', incomplete ' + summary.counts.failed + '.', '', summary.note, '',
       'Evaluator requests in retained assessments: ' + summary.evaluatorRequests + '. Failed or cancelled reviews may also consume usage.', '',
       '| Measure | Baseline | Candidate |', '|---|---|---|');
-    for (const key of ['attempted', 'succeeded', 'medianLatencyMs', 'latencySamples', 'inputTokens', 'outputTokens', 'knownInputTokens', 'knownOutputTokens']) {
+    for (const key of ['attempted', 'succeeded', 'medianLatencyMs', 'latencySamples', 'inputTokens', 'outputTokens', 'estimatedInputTokens', 'estimatedOutputTokens', 'knownInputTokens', 'knownOutputTokens', 'modelRequestCount', 'toolCallCount']) {
       lines.push('| ' + key + ' | ' + (summary.metrics.baseline[key] ?? 'Unknown') + ' | ' + (summary.metrics.candidate[key] ?? 'Unknown') + ' |');
     }
+    for (const item of summary.efficiency) lines.push('', item.label + ': ' + item.value + '. ' + item.hint);
+    for (const side of ['baseline', 'candidate']) {
+      lines.push('', 'Average tokens per successful run (' + side + '): ' +
+        Object.entries(summary.metrics[side].tokensPerRun).map(([key, value]) => key + '=' + (value ?? 'Unknown')).join(', '));
+    }
     for (const warning of summary.warnings) lines.push('', '- ' + escapeMd(warning));
-    for (const pair of test.pairs) lines.push('', '### Paired run ' + pair.number, '',
-      'Generation order: ' + pair.order.join(' then ') + '. Baseline: ' + pair.baseline.status + '. Candidate: ' + pair.candidate.status + '.',
-      'Review: ' + pair.evaluationStatus + '.', '', pair.evaluation ? escapeMd(pair.evaluation.summary) : 'No completed assessment.',
-      pair.evaluationError ? escapeMd(pair.evaluationError) : '');
-    lines.push('', '<details><summary>Frozen inputs and complete test record (includes responses and citations)</summary>', '',
+    for (const pair of test.pairs) {
+      lines.push('', '### Paired run ' + pair.number, '',
+        'Generation order: ' + pair.order.join(' then ') + '. Baseline: ' + pair.baseline.status + '. Candidate: ' + pair.candidate.status + '.',
+        'Review: ' + pair.evaluationStatus + '.', '', pair.evaluation ? escapeMd(pair.evaluation.summary) : 'No completed assessment.',
+        pair.evaluationError ? escapeMd(pair.evaluationError) : '');
+      for (const side of ['baseline', 'candidate']) {
+        const budget = pair[side].result?.investigationBudget;
+        if (budget) lines.push('', side + (budget.limited ? ' **Budget-limited investigation**' : ' investigation') +
+          ': ' + budget.modelRequests + '/' + budget.limits.modelRequests + ' model requests; ' +
+          budget.toolCalls + '/' + budget.limits.toolCalls + ' tool calls; ' + budget.skippedToolCalls + ' skipped calls; ' +
+          budget.evidenceCharacters + '/' + budget.limits.evidenceCharacters + ' retained evidence characters.');
+      }
+    }
+    lines.push('', '<details><summary>' + (test.plan.comparisonMode === 'end-to-end' ? 'Task, Datadog results and complete test record' : 'Frozen inputs and complete test record') +
+      ' (includes responses and citations)</summary>', '',
       fencedText(JSON.stringify(test, null, 2)), '', '</details>', '');
   }
   lines.push('## Quality assessment', '');
+  lines.push('Comparison type: ' + (r.comparisonKind === 'prompt' ? 'prompt variants (shared model)' : 'model comparison') + '.', '');
   lines.push('Comparison mode: ' + (r.comparisonMode || 'end-to-end') + '.', '');
   const assessment = r.evaluation;
   const verdictLabel = verdict => ({ baseline: 'Baseline better', candidate: 'Candidate better', tie: 'Tie',
@@ -381,6 +410,8 @@ function asMarkdown(result) {
     '| Provider model | ' + escapeMd(r.baseline.reportedModel || 'Unverified') + ' | ' + escapeMd(r.candidate.reportedModel || 'Unverified') + ' |',
     '| Context window (tokens) | ' + (r.baseline.contextWindowTokens ?? 'Unknown') + ' | ' + (r.candidate.contextWindowTokens ?? 'Unknown') + ' |',
     '| Context source | ' + escapeMd(r.baseline.contextWindowSource) + ' | ' + escapeMd(r.candidate.contextWindowSource) + ' |',
+    '| Input tokens (estimated; VS Code) | ' + (r.baseline.estimatedInputTokens ?? 'Unknown') + ' | ' + (r.candidate.estimatedInputTokens ?? 'Unknown') + ' |',
+    '| Output tokens (estimated; VS Code, visible text and tool calls) | ' + (r.baseline.estimatedOutputTokens ?? 'Unknown') + ' | ' + (r.candidate.estimatedOutputTokens ?? 'Unknown') + ' |',
     '| Input tokens (last returned call for agent traces) | ' + (r.baseline.inputTokens ?? 'Unknown') + ' | ' + (r.candidate.inputTokens ?? 'Unknown') + ' |',
     '| Output tokens (last returned call for agent traces) | ' + (r.baseline.outputTokens ?? 'Unknown') + ' | ' + (r.candidate.outputTokens ?? 'Unknown') + ' |',
     '| Output cap | ' + (r.baseline.maxOutputTokens ?? 'Unknown') + ' | ' + (r.candidate.maxOutputTokens ?? 'Unknown') + ' |',
@@ -414,6 +445,18 @@ function asMarkdown(result) {
     '## Responses', '', '### Baseline', '', fencedText(responseContent(r.baseline.response)), '',
     '### Candidate', '', fencedText(responseContent(r.candidate.response)), '',
     '<details><summary>Raw responses</summary>', '', fencedText(r.baseline.response), '', fencedText(r.candidate.response), '', '</details>', '');
+  const reports = r.testRun ? [['Baseline', r.testSummary.metrics.baseline.usage], ['Candidate', r.testSummary.metrics.candidate.usage],
+    ['Evaluator (separate)', r.testSummary.evaluatorUsage]]
+    : [['Baseline', r.baseline.usage], ['Candidate', r.candidate.usage], ['Evaluator (separate)', usageReport(r.evaluation?.usageTurns || [])]];
+  lines.push('', '## Azure-equivalent token estimates', '');
+  for (const [label, report] of reports) {
+    if (!report) continue;
+    lines.push('### ' + label, '', report.total + '. ' + report.hint, '', report.note, '',
+      '| Request | Model | Tokens in | Tokens out | USD short/standard | USD long | Basis |',
+      '|---|---|---:|---:|---:|---:|---|');
+    for (const row of report.rows) lines.push('| ' + [row.label, row.model, row.input, row.output, row.short, row.long, row.note].map(escapeMd).join(' | ') + ' |');
+    lines.push('', 'Source: ' + report.source, '');
+  }
   return lines.join('\n');
 }
 

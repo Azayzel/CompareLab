@@ -1,4 +1,5 @@
 'use strict';
+const { usageTurn } = require('./usage');
 
 /**
  * Opt-in, dependency-free chat runners. Never stores or logs API keys.
@@ -94,9 +95,16 @@ function validateModelInput(input) {
   return { provider, endpoint, model, prompt, systemPrompt, context, maxOutput, temperature };
 }
 
-async function runModel(input, { apiKey, fetchImpl = globalThis.fetch, signal } = {}) {
+async function runModel(input, { apiKey, fetchImpl = globalThis.fetch, signal, conversation, tools } = {}) {
   const { provider, endpoint, model, prompt, systemPrompt, context, maxOutput, temperature } = validateModelInput(input);
-  const messages = [...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []), { role: 'user', content: prompt }];
+  const messages = conversation ? conversation.map(message => ({
+    role: message.role, content: message.content,
+    ...(message.role === 'tool' ? (provider === 'ollama'
+      ? { tool_name: conversation.flatMap(turn => turn.toolCalls || []).find(call => call.callId === message.toolCallId)?.name }
+      : { tool_call_id: message.toolCallId }) : {}),
+    ...(message.toolCalls ? { tool_calls: message.toolCalls.map(call => ({ id: call.callId, type: 'function',
+      function: { name: call.name, arguments: provider === 'ollama' ? call.input : JSON.stringify(call.input) } })) } : {})
+  })) : [...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []), { role: 'user', content: prompt }];
   const headers = { 'Content-Type': 'application/json' };
   let target, body;
   if (provider === 'ollama') {
@@ -117,6 +125,8 @@ async function runModel(input, { apiKey, fetchImpl = globalThis.fetch, signal } 
     if (temperature !== null) body.temperature = temperature;
     if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
   }
+  if (tools?.length) body.tools = tools.map(tool => ({ type: 'function',
+    function: { name: tool.name, description: tool.description, parameters: tool.inputSchema || { type: 'object', properties: {} } } }));
   const start = Date.now();
   const controller = new AbortController();
   const cancel = () => controller.abort(new DOMException('Model request cancelled', 'AbortError'));
@@ -145,10 +155,22 @@ async function runModel(input, { apiKey, fetchImpl = globalThis.fetch, signal } 
   let data;
   try { data = JSON.parse(text); } catch { throw new Error('Model endpoint returned invalid JSON'); }
   const response = provider === 'ollama' ? getContent(data.message) : getContent(data?.choices?.[0]?.message);
+  const message = provider === 'ollama' ? data.message : data?.choices?.[0]?.message;
+  if (tools && message?.tool_calls != null && !Array.isArray(message.tool_calls)) throw new Error('Model returned an invalid tool call list');
+  const toolCalls = tools ? (message?.tool_calls || []).map((call, index) => {
+    if (!call || typeof call.function?.name !== 'string' || (provider !== 'ollama' && (typeof call.id !== 'string' || !call.id))) {
+      throw new Error('Model returned an invalid tool call');
+    }
+    let args = call.function?.arguments;
+    if (typeof args === 'string') {
+      try { args = JSON.parse(args); } catch { throw new Error('Model returned invalid JSON in tool arguments'); }
+    }
+    return { callId: call.id || 'call-' + (conversation?.length || 0) + '-' + index, name: call.function?.name, input: args };
+  }) : [];
   if (!response && provider === 'openai' && data?.choices?.[0]?.message?.refusal) {
     throw new Error('Model refused the request without returning response text');
   }
-  if (typeof response !== 'string' || !response.trim()) {
+  if ((typeof response !== 'string' || !response.trim()) && !toolCalls.length) {
     throw new Error('Model returned no visible text (possibly a tool-only or reasoning-only completion)');
   }
   const counts = provider === 'ollama'
@@ -159,10 +181,12 @@ async function runModel(input, { apiKey, fetchImpl = globalThis.fetch, signal } 
   return {
     provider, model, reportedModel: typeof data.model === 'string' ? data.model : null,
     prompt, response,
+    ...(tools ? { toolCalls, requestMessages: conversation } : {}),
     ...(systemPrompt ? { systemPrompt } : {}),
     contextWindowTokens: context,
     contextWindowSource: provider === 'ollama' && context ? 'configured' : (input.contextWindowSource || 'unverified'),
     inputTokens, outputTokens, maxOutputTokens: maxOutput,
+    usageTurns: [usageTurn({ model, reportedModel: typeof data.model === 'string' ? data.model : null, inputTokens, outputTokens })],
     finishReason: provider === 'ollama' ? (data.done_reason || null) : (data.choices?.[0]?.finish_reason || null),
     temperature, runId: typeof data.id === 'string' ? data.id : null,
     elapsedMs: Date.now() - start
