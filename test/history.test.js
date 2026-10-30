@@ -42,6 +42,18 @@ test('keeps at most the latest 50 entries and removes the oldest', async t => {
   await assert.rejects(store.get(first.entry.id), /no longer in history/);
 });
 
+test('prompt drafts persist across store instances and are listed as unreviewed drafts', async t => {
+  const root = await directory(t);
+  const input = { comparisonKind: 'prompt', incomingMessage: 'Shared alert', evidence: 'Frozen evidence',
+    baseline: { model: 'shared', prompt: 'Original prompt' }, candidate: { model: 'shared', prompt: 'Edited prompt' } };
+  const { entry } = await createHistory(root).save(input);
+  const reopened = createHistory(root);
+  const list = await reopened.list();
+  assert.equal(list.entries[0].comparisonKind, 'prompt');
+  assert.equal(list.entries[0].status, 'draft');
+  assert.deepEqual((await reopened.get(entry.id)).experiment, input);
+});
+
 test('enforces exact serialized UTF-8 byte limits, retaining entries at the boundary', async t => {
   const root = await directory(t);
   const input = comparison('Evidence: ' + 'é'.repeat(100));

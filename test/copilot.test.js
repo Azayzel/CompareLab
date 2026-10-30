@@ -501,3 +501,35 @@ test('VS Code generation rejects cancellation, oversized inputs, and empty outpu
   model.sendRequest = async () => ({ text: (async function* () { yield ''; })() });
   await assert.rejects(runWithVsCode(api, { prompt: 'Task' }, model), /no visible response/);
 });
+
+test('frozen prompt generation sizes complete messages by tokens rather than characters', async () => {
+  const api = generationApi();
+  const prompt = 'Complete evidence snapshot. '.repeat(10000);
+  const model = fakeModel();
+  const requests = [];
+  model.sendRequest = async messages => {
+    requests.push(messages);
+    return { text: (async function* () { yield 'Grounded answer'; })() };
+  };
+  model.maxInputTokens = 200;
+  const request = { prompt, systemPrompt: 'Original instructions' };
+  const result = await runWithVsCode(api, request, model, undefined, { tokenAwareInput: true });
+  assert.equal(result.estimatedInputTokens, 200);
+  assert.equal(requests[0][1].content, prompt);
+  assert.equal(result.prompt, prompt);
+  model.maxInputTokens = 199;
+  await assert.rejects(runWithVsCode(api, request, model, undefined, { tokenAwareInput: true }),
+    /needs 200 tokens.*input limit of 199.*nothing was truncated/);
+  assert.equal(requests.length, 1);
+  for (const limit of [undefined, NaN, 1.5]) {
+    model.maxInputTokens = limit;
+    await assert.rejects(runWithVsCode(api, request, model, undefined, { tokenAwareInput: true }), /usable input-token limit|not ready/);
+  }
+  model.maxInputTokens = 10000;
+  for (const count of [NaN, 0, -1, 0.5]) {
+    model.countTokens = async () => count;
+    await assert.rejects(runWithVsCode(api, request, model, undefined, { tokenAwareInput: true }), /invalid input-token count/);
+  }
+  await assert.rejects(runWithVsCode(api, request, model), /150,000-character limit/);
+  assert.equal(requests.length, 1);
+});

@@ -2,6 +2,8 @@
 const { validateTrace, summarizeTrace, traceDifferences } = require('./traces');
 const { composeAgentTask, comparisonKind, createTestPlan, pairEvidence, validateTestRecord, summarizeTest } = require('./orchestration');
 const { validateUsageTurns, usageReport } = require('./usage');
+const { validatePromptChanges, promptDecision } = require('./prompt-review');
+const { responseContent } = require('./response');
 
 /**
  * Shared, dependency-free engine for the VS Code extension and CLI.
@@ -39,18 +41,6 @@ Return only JSON, no Markdown fences, with exactly one entry for each of the six
 "citations":[{"source":"A|B|evidence|taskA|taskB","quote":"Exact source quote"}]}],
 "unknowns":["Specific missing evidence or unverified claims"]}`;
 
-function responseContent(value) {
-  const text = String(value ?? '');
-  let parsed;
-  try { parsed = JSON.parse(text); } catch { return text; }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return text;
-  const entries = Object.entries(parsed);
-  if (!entries.some(([key, content]) => /^(analysis|recommendation)$/i.test(key) && typeof content === 'string')) return text;
-  return entries.filter(([key]) => !/^(eventid|agentdefinition|completedat|model|reportedmodel|modelversion|provider|runid)$/i.test(key))
-    .map(([key, content]) => key + '\n\n' + (typeof content === 'string' ? content : JSON.stringify(content, null, 2)))
-    .join('\n\n');
-}
-
 function resolvePrompt(sharedPrompt, override) {
   const text = String(override ?? '');
   return text.trim() ? text : String(sharedPrompt ?? '');
@@ -68,7 +58,15 @@ function reviewPacket(input, reversed = false) {
   const missingTasks = [!packet.taskA.trim() && 'Baseline', !packet.taskB.trim() && 'Candidate'].filter(Boolean);
   if (missingTasks.length) throw new Error('Provide the original task for ' + missingTasks.join(' and ') + '. Enter a Shared prompt or the corresponding Prompt override.');
   if (!packet.A.trim() || !packet.B.trim()) throw new Error('Provide both responses before reviewing');
-  return reversed ? { ...packet, taskA: packet.taskB, taskB: packet.taskA, A: packet.B, B: packet.A } : packet;
+  const ordered = reversed ? { ...packet, taskA: packet.taskB, taskB: packet.taskA, A: packet.B, B: packet.A } : packet;
+  if (input.comparisonKind === 'prompt') {
+    const original = resolvePrompt(input.prompt, input.baseline?.prompt);
+    const edited = resolvePrompt(input.prompt, input.candidate?.prompt);
+    ordered.promptA = reversed ? edited : original;
+    ordered.promptB = reversed ? original : edited;
+    ordered.promptDiff = reversed ? diffText(edited, original) : diffText(original, edited);
+  }
+  return ordered;
 }
 
 class CitationValidationError extends Error {
@@ -139,7 +137,33 @@ function parseAssessment(text, packet, reversed = false) {
     summary = 'Provisional recommendation (low confidence): factual correctness is not verified by the supplied evidence. ' + summary;
     if (!packet.evidence.trim()) unknowns.unshift('No source evidence was supplied; factual correctness cannot be verified.');
   }
-  return { verdict, summary, criteria, unknowns, preferenceEstablished: ['A', 'B'].includes(assessment.verdict) };
+  let promptChanges;
+  if (packet.promptDiff) {
+    if (!Array.isArray(assessment.promptChanges)) throw new CitationValidationError('prompt change', 'Return a promptChanges array.');
+    const changes = assessment.promptChanges.map(change => {
+      if (!change || typeof change !== 'object' || !Array.isArray(change.citations)) {
+        throw new CitationValidationError('prompt change', 'Each change requires a citations array.');
+      }
+      return { change: change.change, impact: change.impact, recommendation: change.recommendation,
+        effect: reversed ? ({ improvement: 'regression', regression: 'improvement', uncertain: 'uncertain' })[change.effect] : change.effect,
+        citations: change.citations.map(citation => ({
+          quote: citation?.quote,
+          source: citation?.source === 'promptA' ? mapSide('A') + 'Prompt' : citation?.source === 'promptB' ? mapSide('B') + 'Prompt'
+            : citation?.source === 'taskA' ? mapSide('A') + 'Task' : citation?.source === 'taskB' ? mapSide('B') + 'Task' : mapSide(citation?.source)
+        }))
+      };
+    });
+    const sources = reversed ? { baselineTask: packet.taskB, candidateTask: packet.taskA, baselinePrompt: packet.promptB,
+      candidatePrompt: packet.promptA, baseline: packet.B, candidate: packet.A }
+      : { baselineTask: packet.taskA, candidateTask: packet.taskB, baselinePrompt: packet.promptA,
+        candidatePrompt: packet.promptB, baseline: packet.A, candidate: packet.B };
+    const spans = reversed ? packet.promptDiff.map(span => ({ ...span,
+      type: ({ add: 'remove', remove: 'add', equal: 'equal' })[span.type] })) : packet.promptDiff;
+    try { promptChanges = validatePromptChanges(changes, sources, spans); }
+    catch (error) { throw new CitationValidationError('prompt change', error.message); }
+  }
+  return { verdict, summary, criteria, unknowns, preferenceEstablished: ['A', 'B'].includes(assessment.verdict),
+    ...(promptChanges ? { promptChanges } : {}) };
 }
 
 function words(value) {
@@ -163,6 +187,17 @@ function diffText(left, right) {
   }
   if (!a.length) return [{ type: 'add', text: b.join('') }];
   if (!b.length) return [{ type: 'remove', text: a.join('') }];
+  let start = 0;
+  let end = 0;
+  while (start < Math.min(a.length, b.length) && a[start] === b[start]) start++;
+  while (end < Math.min(a.length, b.length) - start && a[a.length - end - 1] === b[b.length - end - 1]) end++;
+  if (start || end) {
+    return [
+      ...(start ? [{ type: 'equal', text: a.slice(0, start).join('') }] : []),
+      ...diffText(a.slice(start, a.length - end).join(''), b.slice(start, b.length - end).join('')),
+      ...(end ? [{ type: 'equal', text: a.slice(a.length - end).join('') }] : [])
+    ].filter(span => span.text);
+  }
   if (a.length * b.length > MAX_MATRIX_CELLS) {
     return [
       { type: 'remove', text: a.join('') },
@@ -199,6 +234,34 @@ function intOrNull(value) {
   if (value === '' || value === null || value === undefined) return null;
   const n = Number(value);
   return Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+
+function changePassages(spans) {
+  const passages = [];
+  let index = 0;
+  while (index < spans.length) {
+    if (spans[index].type === 'equal') { index++; continue; }
+    const start = index;
+    let end = index;
+    while (end + 1 < spans.length) {
+      const next = spans[end + 1];
+      if (next.type !== 'equal') { end++; continue; }
+      if (end + 2 < spans.length && !/\n[^\n]*\n/.test(next.text)) { end += 2; continue; }
+      break;
+    }
+    const prefix = start > 0 ? spans[start - 1].text.split('\n').at(-1) : '';
+    const suffix = end + 1 < spans.length ? spans[end + 1].text.split('\n')[0] : '';
+    const excerpt = [
+      ...(prefix ? [{ type: 'equal', text: prefix }] : []),
+      ...spans.slice(start, end + 1),
+      ...(suffix ? [{ type: 'equal', text: suffix }] : [])
+    ];
+    const original = excerpt.filter(span => span.type !== 'add');
+    const edited = excerpt.filter(span => span.type !== 'remove');
+    passages.push({ original, edited });
+    index = end + 1;
+  }
+  return passages;
 }
 
 function describeVariant(input = {}) {
@@ -306,6 +369,8 @@ function compare(input) {
   const baseline = describeVariant({ ...input.baseline, prompt: composeAgentTask(resolvePrompt(input.prompt, input.baseline?.prompt), input.incomingMessage) });
   const candidate = describeVariant({ ...input.candidate, prompt: composeAgentTask(resolvePrompt(input.prompt, input.candidate?.prompt), input.incomingMessage) });
   const spans = diffText(baseline.response, candidate.response);
+  const promptSpans = kind === 'prompt'
+    ? diffText(resolvePrompt(input.prompt, input.baseline?.prompt), resolvePrompt(input.prompt, input.candidate?.prompt)) : null;
   const comparisonMode = input.comparisonMode || 'end-to-end';
   if (!['end-to-end', 'model-prompt-only'].includes(comparisonMode)) throw new Error('Unsupported comparison mode');
   let testRun = validateTestRecord(input.testRun);
@@ -328,9 +393,17 @@ function compare(input) {
     comparisonKind: kind,
     testRun, testSummary: testRun ? summarizeTest(testRun) : null,
     baseline, candidate,
+    ...(testRun?.plan.evidenceCollection || input.evidenceCollection ? {
+      evidenceCollection: testRun?.plan.evidenceCollection || input.evidenceCollection
+    } : {}),
+    ...(kind === 'prompt' ? { promptComparison: {
+      original: resolvePrompt(input.prompt, input.baseline?.prompt), edited: resolvePrompt(input.prompt, input.candidate?.prompt),
+      spans: promptSpans, passages: changePassages(promptSpans)
+    } } : {}),
     incomingMessage: String(input.incomingMessage || ''),
     evidence,
     spans,
+    ...(kind === 'prompt' ? { outputPassages: changePassages(spans) } : {}),
     measures: {
       baselineWords: countWords(baseline.response),
       candidateWords: countWords(candidate.response),
@@ -346,6 +419,18 @@ function compare(input) {
 function asMarkdown(result) {
   const r = result;
   const lines = ['# CompareLab report', ''];
+  if (r.comparisonKind === 'prompt') {
+    const decision = promptDecision(r);
+    lines.push('## Prompt edit review', '', '**' + decision.verdict + '** — ' + decision.action, '', decision.reason, '', decision.caveat, '',
+      '### Prompt changes', '', ...r.promptComparison.spans.filter(span => span.type !== 'equal')
+        .flatMap(span => [span.type === 'add' ? 'Added:' : 'Removed:', fencedText(span.text), '']));
+    for (const change of decision.changes) lines.push('### ' + escapeMd(change.change), '', change.effect + ': ' + escapeMd(change.impact),
+      '', escapeMd(change.recommendation), '', ...change.citations.flatMap(citation => [citation.source + ':', fencedText(citation.quote), '']));
+    if (r.evidenceCollection) lines.push('### Shared evidence collection (separate)', '',
+      'Model: ' + escapeMd(r.evidenceCollection.model) + '. Model turns: ' + r.evidenceCollection.modelRequestCount +
+      '. Tool calls: ' + r.evidenceCollection.toolCallCount + '. These are not included in either prompt’s totals.', '',
+      fencedText(JSON.stringify(r.evidenceCollection, null, 2)), '');
+  }
   if (r.testRun) {
     const test = r.testRun;
     const summary = summarizeTest(test);
@@ -469,5 +554,5 @@ function fencedText(value) {
 
 function escapeMd(s) { return String(s).replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' '); }
 
-module.exports = { compare, diffText, assessFairness, describeVariant, asMarkdown,
+module.exports = { compare, diffText, changePassages, assessFairness, describeVariant, asMarkdown,
   responseContent, resolvePrompt, reviewPacket, parseAssessment, CitationValidationError, REVIEW_CRITERIA, REVIEW_RUBRIC, REVIEW_INSTRUCTIONS };

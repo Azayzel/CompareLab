@@ -2,6 +2,7 @@
 const { randomBytes } = require('node:crypto');
 const { responseContent } = require('./core');
 const { usageReport } = require('./usage');
+const { promptDecision } = require('./prompt-review');
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, character =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -11,6 +12,18 @@ const details = (title, body) => `<details class="result-details"><summary>${esc
 const raw = value => `<pre class="response-content">${escape(value)}</pre>`;
 const metric = (title, value, hint = '') => `<div class="metric-tile"><span class="metric-label">${escape(title)}</span>
   <strong class="metric-value">${escape(value)}</strong><span class="metric-hint">${escape(hint)}</span></div>`;
+
+function changesOnly(spans, passages, label) {
+  if (!passages.length) return '<p class="notice">No changes.</p>';
+  return `<p class="notice">${passages.length} ${passages.length === 1 ? 'passage changed' : 'passages changed'} · Unchanged sections hidden</p>` +
+    passages.map((passage, index) => `<section class="change-passage"><h3>Change ${index + 1}</h3><div class="change-pair">${
+      ['original', 'edited'].map(side => `<div class="change-version"><strong class="change-label">${side === 'original' ? 'Original' : 'Edited'}</strong>
+      <div class="change-text">${passage[side].some(span => span.text) ? passage[side].map(span =>
+        `<span class="${span.type}">${escape(span.text)}</span>`).join('') : '<span class="notice">No text</span>'}</div></div>`).join('')
+    }</div></section>`).join('') +
+    details('Show full ' + label + ' diff', `<div class="diff">${spans.map(span =>
+      `<span class="${span.type}">${escape(span.text)}</span>`).join('')}</div>`);
+}
 
 function tokens(result = {}, title = 'Tokens in / out', hint) {
   const count = (actual, estimated) => actual != null ? actual.toLocaleString(undefined, { maximumFractionDigits: 1 })
@@ -97,6 +110,19 @@ function asHtml(result, { css, markdownScript }) {
       <div class="readable-responses">${['baseline', 'candidate'].map(side =>
     response(side, result[side], result[side].response ? 'Received' : 'Missing', winner)).join('')}</div></section>`;
   const warnings = [...(summary?.warnings || []), ...(result.fairness?.warnings || []).map(item => item.message)];
+  const prompt = result.comparisonKind === 'prompt' ? promptDecision(result) : null;
+  const promptReport = prompt ? `<section class="prompt-verdict"><p class="eyebrow">PROMPT EDIT REVIEW</p>
+    <h2>${escape(prompt.verdict)}</h2><strong>${escape(prompt.action)}</strong><p>${escape(prompt.reason)}</p>
+    <p class="notice">${escape(prompt.caveat)}</p></section>
+    ${result.evidenceCollection ? details('Shared evidence collection (separate from prompt tests)',
+    `<p>Not included in either prompt totals.</p>${raw(JSON.stringify(result.evidenceCollection, null, 2))}`) : ''}
+    <h2>What changed in the prompt?</h2>${changesOnly(result.promptComparison.spans, result.promptComparison.passages, 'prompt')}
+    ${prompt.changes.map(change => `<article class="prompt-change"><h3>${escape(change.change)}</h3>
+    <span class="status-badge">${escape(change.effect)}</span><p>${escape(change.impact)}</p><strong>${escape(change.recommendation)}</strong>
+    ${details('See the prompt edit and output evidence', change.citations.map(citation =>
+    `<blockquote><strong>${escape(({ baselinePrompt: 'Original prompt', candidatePrompt: 'Edited prompt', baselineTask: 'Original task',
+    candidateTask: 'Edited task', baseline: 'Original output', candidate: 'Edited output' })[citation.source])}</strong>${raw(citation.quote)}</blockquote>`).join(''))}</article>`).join('')}
+    ${details('Output changes', changesOnly(result.spans, result.outputPassages, 'output'))}` : '';
   const data = JSON.stringify(markdown).replaceAll('<', '\\u003c').replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'">
@@ -123,14 +149,15 @@ function asHtml(result, { css, markdownScript }) {
       .readable-responses, .analysis-models { display: block; } article { margin: 14px 0; } .response-content { max-height: none; } }
     </style></head><body><main><header><div><h1>⇄ CompareLab</h1><p>${kind} · Offline assessment report</p></div>
     <span class="status-badge">${escape(test?.status || (result.evaluation ? 'Reviewed' : 'Not evaluated'))}</span></header>
-    <section class="analysis-overview"><p class="eyebrow">${kind.toUpperCase()}</p><h2>${title}</h2>
+    ${prompt ? promptReport : `<section class="analysis-overview"><p class="eyebrow">${kind.toUpperCase()}</p><h2>${title}</h2>
     <p class="overview-description">${test ? escape(summary?.note) : 'A practical, task-specific comparison. Recommendations and cited evidence still require human verification.'}</p>
     ${summary ? `<div class="overview-metrics">${metric('Pairs reviewed', test.pairs.filter(pair => pair.evaluationStatus === 'succeeded').length + ' / ' + test.plan.repetitions)}
     ${metric('Supported baseline preferences', summary.counts.baseline)}${metric('Supported candidate preferences', summary.counts.candidate)}</div>` : ''}</section>
     <div class="analysis-models">${modelCards}</div>${efficiency}${warnings.length ? details('Interpretation and limitations',
-    warnings.map(warning => `<p class="warning-callout">${escape(warning)}</p>`).join('')) : ''}
+    warnings.map(warning => `<p class="warning-callout">${escape(warning)}</p>`).join('')) : ''}`}
     <noscript><p class="notice">JavaScript is disabled. Responses remain available as raw Markdown below.</p></noscript>
-    ${runs}<section class="report-context"><h2>Inputs &amp; audit trail</h2>
+    ${prompt ? details('Full outputs, reviews and technical details', runs + `<div class="analysis-models">${modelCards}</div>` + efficiency) : runs}
+    <section class="report-context"><h2>Inputs &amp; audit trail</h2>
     ${details('Instructions, trigger, and evidence', `<h3>Baseline instructions</h3>${raw(result.baseline.prompt)}<h3>Candidate instructions</h3>${raw(result.candidate.prompt)}
       <h3>Incoming message</h3>${raw(result.incomingMessage)}<h3>Evidence supplied to the review</h3>${raw(result.evidence)}`)}
     ${details('Complete comparison record (includes source data)', raw(JSON.stringify(result, null, 2)))}</section>

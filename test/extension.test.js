@@ -93,6 +93,9 @@ function webview(initialState) {
   const messages = [];
   let state = initialState;
   let onMessage;
+  let now = 0;
+  let nextTimer = 0;
+  const timers = new Map();
   const node = () => ({
     value: '', checked: true, listeners: new Map(), children: [],
     replaceChildren(...children) { this.children = children; },
@@ -112,15 +115,22 @@ function webview(initialState) {
       'modelVersion', 'contextWindowTokens', 'contextWindowSource', 'inputTokens', 'outputTokens', 'maxOutputTokens',
       'finishReason', 'temperature']) field(prefix + '-' + key);
   }
+  for (const id of ['prompt', 'incomingMessage', 'evidence', 'comparisonMode', 'checks', 'testRepetitions', 'checkOrder',
+    'optimizerGoal', 'optimizerPreserve', 'optimizerSuccess', 'optimizerDraft']) field(id);
   const scripts = ['markdown.js', 'app.js'].map(file => fs.readFileSync(path.join(__dirname, '../media/' + file), 'utf8')).join('\n');
   vm.runInNewContext(scripts, {
     URL,
+    Date: class extends Date { static now() { return now; } },
+    setInterval(callback) { const id = ++nextTimer; timers.set(id, callback); return id; },
+    clearInterval(id) { timers.delete(id); },
     document: { getElementById: field, createElement: tag => ({ ...node(), tagName: tag.toUpperCase() }),
       createTextNode: text => ({ textContent: text, children: [] }), querySelectorAll: () => [...elements.values()] },
     window: { addEventListener(type, listener) { if (type === 'message') onMessage = listener; } },
     acquireVsCodeApi: () => ({ getState: () => state, setState: value => { state = value; }, postMessage: message => messages.push(message) })
   });
   return { field, messages, state: () => state, click: id => field(id).listeners.get('click')(),
+    advanceTime(milliseconds) { now += milliseconds; for (const tick of timers.values()) tick(); },
+    timerCount: () => timers.size,
     receive: data => onMessage({ data }) };
 }
 
@@ -350,6 +360,11 @@ test('model and prompt tabs keep independent drafts and prompt exports use exact
   assert.equal(panel.field('a-promptSection').open, true);
   assert.equal(panel.field('a-prompt').value, input.prompt);
   assert.equal(panel.field('a-response').value, '');
+  assert.equal(panel.field('comparisonMode').value, 'model-prompt-only');
+  assert.equal(panel.field('testRepetitions').value, 1);
+  assert.equal(panel.field('promptAdvanced').open, false);
+  assert.equal(panel.field('promptAudit').open, false);
+  assert.equal(panel.field('promptTools').hidden, false);
   panel.field('b-prompt').value = 'Alternative instructions';
   panel.field('a-model').value = 'shared-model';
   panel.click('export');
@@ -370,6 +385,359 @@ test('model and prompt tabs keep independent drafts and prompt exports use exact
   assert.equal(restored.field('a-model').value, 'model-a');
   assert.equal(restored.field('b-response').value, 'B report');
   assert.match(host().markup, /<details class="raw-editor"><summary>Paste \/ edit raw response/);
+});
+
+test('guided prompt drafts require explicit application, preserve original, reject stale replies and never auto-test', async () => {
+  const panel = webview(experiment());
+  panel.click('promptTab');
+  panel.click('generatePrompt');
+  const message = panel.messages.at(-1);
+  assert.equal(message.type, 'generatePrompt');
+  panel.receive({ type: 'optimizerDraft', revision: message.revision, draft: { prompt: 'Draft instructions', summary: 'Specific edits.', usageTurns: [] } });
+  assert.equal(panel.field('b-prompt').value, experiment().prompt);
+  assert.equal(panel.field('optimizerPreview').hidden, false);
+  panel.field('optimizerDraft').value = 'My reviewed draft';
+  panel.click('applyPromptDraft');
+  assert.equal(panel.field('a-prompt').value, experiment().prompt);
+  assert.equal(panel.field('b-prompt').value, 'My reviewed draft');
+  assert.equal(panel.field('b-response').value, '');
+  assert.equal(panel.messages.some(m => m.type === 'orchestrate'), false);
+  const restored = webview(panel.state());
+  assert.equal(restored.field('optimizerDraft').value, 'My reviewed draft');
+  panel.field('b-prompt').value = 'Newer edit';
+  panel.field('b-prompt').listeners.get('input')();
+  panel.receive({ type: 'optimizerDraft', revision: message.revision, draft: { prompt: 'Stale overwrite', summary: 'Old draft' } });
+  assert.equal(panel.field('b-prompt').value, 'Newer edit');
+  assert.equal(panel.field('optimizerDraft').value, 'My reviewed draft');
+  panel.click('compareTab');
+  panel.receive({ type: 'optimizerDraft', revision: panel.messages.at(-1).revision, draft: { prompt: 'Wrong tab', summary: 'Old draft' } });
+  assert.equal(panel.field('optimizerDraft').value, '');
+});
+
+test('prompt view focuses on edit evidence and only permits adoption for a Better verdict', () => {
+  const { compare } = require('../src/core');
+  const source = { comparisonKind: 'prompt', comparisonMode: 'model-prompt-only',
+    baseline: { provider: 'vscode', model: 'shared', prompt: 'Original instructions', response: 'Original output' },
+    candidate: { provider: 'vscode', model: 'shared', prompt: 'Edited instructions', response: 'Edited output' } };
+  for (const verdict of ['Better', 'Worse', 'No clear improvement']) {
+    const panel = webview(source);
+    const result = compare(source);
+    result.evaluation = { verdict: 'candidate', summary: 'Reviewed output evidence.', model: { name: 'Reviewer' },
+      criteria: [], unknowns: [], judgments: [], inputTokenEstimates: [] };
+    result.promptDecision = { verdict, action: verdict === 'Better' ? 'Use edited prompt' : 'Keep original',
+      reason: 'Test-specific conclusion', caveat: 'Verify on other inputs', changes: [{ change: 'Changed instructions', effect: 'uncertain',
+        impact: 'Observed difference', recommendation: 'Keep the required constraints',
+        citations: [{ source: 'candidateTask', quote: 'Edited instructions' }] }] };
+    panel.receive({ type: 'result', revision: panel.messages.at(-1).revision, result });
+    assert.equal(panel.field('promptResults').hidden, false);
+    assert.equal(panel.field('promptAudit').open, false);
+    assert.match(visibleText(panel.field('promptDiff')), /Edited/);
+    assert.match(visibleText(panel.field('promptResults')), /Keep the required constraints/);
+    const adopt = descendants(panel.field('promptResults')).find(node => node.id === 'adoptPrompt');
+    assert.equal(adopt.disabled, verdict !== 'Better');
+    adopt.listeners.get('click')();
+    assert.equal(panel.field('a-prompt').value, verdict === 'Better' ? 'Edited instructions' : 'Original instructions');
+    if (verdict === 'Better') {
+      assert.equal(panel.field('a-response').value, '');
+      assert.equal(panel.field('b-response').value, '');
+      assert.ok(!panel.messages.some(message => message.type === 'orchestrate'));
+    }
+  }
+});
+
+test('prompt comparison has one primary review action and hides legacy model actions even with settings expanded', () => {
+  const panel = webview(experiment());
+  panel.click('promptTab');
+  panel.field('promptAdvanced').open = true;
+  for (const id of ['runBoth', 'compare', 'orchestrate', 'chat', 'evaluate', 'a-run']) {
+    assert.equal(panel.field(id).hidden, true, id + ' is not part of the prompt workflow');
+  }
+  panel.click('promptTest');
+  assert.equal(panel.messages.at(-1).type, 'orchestrate');
+  panel.click('compareTab');
+  for (const id of ['runBoth', 'compare', 'orchestrate', 'chat', 'evaluate', 'a-run']) {
+    assert.equal(panel.field(id).hidden, false, id + ' remains available for model comparison');
+  }
+  assert.equal(panel.field('promptReviewOutputs').hidden, true);
+  assert.match(host().markup, />Review prompt change<\/button>/);
+});
+
+test('prompt diff groups word edits into readable before/after passages with a collapsed full diff', () => {
+  const { compare } = require('../src/core');
+  for (const edited of ['Keep shared context. Verify facts. Preserve output.', 'Keep shared context. Guess facts. Preserve output.']) {
+    const source = { comparisonKind: 'prompt',
+      baseline: { prompt: 'Keep shared context. Guess facts. Preserve output.' }, candidate: { prompt: edited } };
+    const panel = webview(source);
+    panel.receive({ type: 'result', revision: panel.messages.at(-1).revision, result: compare(source) });
+    const container = panel.field('promptDiff');
+    const passages = container.children.filter(node => node.className === 'change-passage');
+    const full = container.children.find(node => node.tagName === 'DETAILS');
+    if (edited.includes('Verify')) {
+      assert.equal(passages.length, 1);
+      const versions = descendants(passages[0]).filter(node => node.className === 'change-version');
+      assert.equal(versions.length, 2);
+      assert.match(visibleText(versions[0]), /Original.*Keep shared context\..*Guess.*facts\. Preserve output\./);
+      assert.doesNotMatch(visibleText(versions[0]), /Verify/);
+      assert.match(visibleText(versions[1]), /Edited.*Keep shared context\..*Verify.*facts\. Preserve output\./);
+      assert.doesNotMatch(visibleText(versions[1]), /Guess/);
+      assert.equal(descendants(versions[0]).find(node => node.className === 'remove').textContent, 'Guess');
+      assert.equal(descendants(versions[1]).find(node => node.className === 'add').textContent, 'Verify');
+      assert.ok(!full.open);
+      assert.match(visibleText(full), /shared context/);
+      assert.match(visibleText(full), /Show full prompt diff/);
+    } else {
+      assert.equal(visibleText(container).trim(), 'No changes.');
+      assert.equal(full, undefined);
+    }
+    panel.click('export');
+    assert.equal(panel.messages.at(-1).experiment.candidate.prompt, edited);
+  }
+});
+
+test('prompt review clearly reports running, completed and failed review states and reveals the final result', async () => {
+  for (const fail of [false, true]) {
+    const instance = host(fail ? { evaluateWithCopilot: async () => { throw new Error('Reviewer context limit exceeded'); } } : {},
+      { runModel: async request => ({ ...request, response: request.prompt.includes('Original') ? 'Original output' : 'Edited output' }) });
+    const source = { comparisonKind: 'prompt', comparisonMode: 'model-prompt-only', evidence: 'Shared facts',
+      baseline: { provider: 'ollama', model: 'shared', prompt: 'Original instructions' },
+      candidate: { provider: 'ollama', model: 'shared', prompt: 'Edited instructions' }, test: { repetitions: 1 } };
+    const panel = webview(source);
+    await instance.send({ type: 'orchestrate', experiment: source });
+    panel.receive({ type: 'busy', value: true, kind: 'test' });
+    const updates = instance.messages.filter(message => message.type === 'testUpdate');
+    const reviewing = updates.find(message => message.record.pairs.some(pair => pair.evaluationStatus === 'running'));
+    panel.receive(reviewing);
+    assert.match(panel.field('reviewProgressTitle').textContent, /Reviewing both outputs/);
+    assert.match(visibleText(panel.field('reviewSteps')), /Shared evidence/);
+    assert.equal(panel.field('reviewProgress').hidden, false);
+    panel.receive(instance.messages.findLast(message => message.type === 'testFinished'));
+    await instance.send(panel.messages.at(-1));
+    panel.receive(instance.messages.findLast(message => message.type === 'result'));
+    const headings = descendants(panel.field('promptResults')).filter(node => node.tagName === 'H2').map(node => node.textContent);
+    assert.deepEqual(headings, [fail ? 'Not reviewed' : 'No clear improvement']);
+    const text = visibleText(panel.field('promptResults'));
+    assert.match(text, fail ? /0 \/ 1 output pairs reviewed/ : /REVIEW COMPLETE/);
+    if (fail) assert.match(text, /Reviewer context limit exceeded/);
+    assert.equal(panel.field('promptResults').focused, true);
+    assert.equal(panel.field('promptResults').scrolledIntoView, true);
+    const status = instance.messages.findLast(message => message.type === 'reviewStatus').message;
+    assert.match(status, fail ? /Review incomplete: 0 of 1/ : /Review complete/);
+  }
+});
+
+test('prompt review exposes preparation and live evidence progress beside the action, with elapsed time and cancellation', () => {
+  const panel = webview({ comparisonKind: 'prompt', comparisonMode: 'model-prompt-only',
+    baseline: { prompt: 'Original' }, candidate: { prompt: 'Edited' } });
+  panel.receive({ type: 'busy', value: true, kind: 'test' });
+  assert.equal(panel.field('reviewProgress').hidden, false);
+  assert.equal(panel.field('reviewProgress')['aria-busy'], 'true');
+  assert.ok(panel.field('promptProgressSlot').children.includes(panel.field('reviewProgress')));
+  assert.ok(panel.field('progressCancelSlot').children.includes(panel.field('cancelReview')));
+  assert.equal(panel.field('promptTest').textContent, 'Review in progress...');
+  assert.equal(panel.field('cancelReview').disabled, false);
+  assert.equal(panel.field('cancelReview').hidden, false);
+  assert.match(panel.field('reviewProgressTitle').textContent, /Preparing/);
+  assert.match(panel.field('reviewProgressDetail').textContent, /Choose a model/);
+  assert.match(visibleText(panel.field('reviewSteps')), /Collect evidence/);
+  panel.advanceTime(65000);
+  assert.equal(panel.field('reviewElapsed').textContent, '1:05 elapsed');
+  panel.receive({ type: 'reviewStatus', phase: 'evidence', message: 'Shared evidence: model request 8 | Tool calls: 43' });
+  assert.equal(panel.field('reviewProgressTitle').textContent, 'Collecting shared Datadog evidence');
+  assert.match(panel.field('reviewProgressDetail').textContent, /Tool calls: 43/);
+  assert.equal(panel.field('reviewSteps').children[0]['data-state'], 'complete');
+  assert.equal(panel.field('reviewSteps').children[1]['aria-current'], 'step');
+  panel.click('cancelReview');
+  assert.equal(panel.messages.at(-1).type, 'cancelReview');
+  assert.equal(panel.field('cancelReview').disabled, true);
+  assert.equal(panel.field('reviewProgressTitle').textContent, 'Cancelling review...');
+  panel.receive({ type: 'reviewStatus', message: 'Shared evidence collection cancelled. Neither prompt was tested.' });
+  panel.receive({ type: 'busy', value: false });
+  assert.equal(panel.field('reviewProgress').hidden, true);
+  assert.equal(panel.field('reviewProgress')['aria-busy'], 'false');
+  assert.equal(panel.field('reviewStatus').hidden, false);
+  assert.match(panel.field('reviewStatus').textContent, /cancelled/);
+  assert.equal(panel.field('promptTest').textContent, 'Review prompt change');
+  assert.equal(panel.timerCount(), 0);
+});
+
+test('shared evidence, original, edited and review stages reflect actual run transitions, without changing model-mode controls', async () => {
+  const instance = host({}, { runModel: async request => ({ ...request, response: 'Output' }) });
+  const source = { comparisonKind: 'prompt', comparisonMode: 'model-prompt-only', evidence: 'Shared facts',
+    baseline: { provider: 'ollama', model: 'shared', prompt: 'Original' },
+    candidate: { provider: 'ollama', model: 'shared', prompt: 'Edited' }, test: { repetitions: 1 } };
+  await instance.send({ type: 'orchestrate', experiment: source });
+  const panel = webview(source);
+  panel.receive({ type: 'busy', value: true, kind: 'test' });
+  for (const [status, title] of [['baseline', 'Running original prompt'], ['candidate', 'Running edited prompt'], ['evaluationStatus', 'Reviewing both outputs']]) {
+    const update = instance.messages.find(message => message.type === 'testUpdate' &&
+      message.record.pairs.some(pair => status === 'evaluationStatus' ? pair[status] === 'running' : pair[status].status === 'running'));
+    assert.ok(update);
+    panel.receive(update);
+    assert.match(panel.field('reviewProgressTitle').textContent, new RegExp(title + ' · Run 1 of 1'));
+    assert.match(visibleText(panel.field('reviewSteps')), /Shared evidence/);
+  }
+  const reversed = structuredClone(instance.messages.find(message => message.type === 'testUpdate' &&
+    message.record.pairs.some(pair => pair.baseline.status === 'running')));
+  reversed.record.pairs[0].baseline.status = 'not-started';
+  reversed.record.pairs[0].candidate.status = 'running';
+  panel.receive(reversed);
+  assert.equal(panel.field('reviewSteps').children[2]['data-state'], 'pending', 'An edited-first run must not claim the original is done');
+  assert.equal(panel.field('reviewSteps').children[3]['data-state'], 'active');
+  panel.receive({ type: 'reviewStatus', message: 'Review complete.' });
+  panel.receive({ type: 'busy', value: false });
+  assert.equal(panel.field('reviewStatus').textContent, 'Review complete.');
+  assert.equal(panel.timerCount(), 0);
+  const model = webview(experiment());
+  model.receive({ type: 'busy', value: true, kind: 'test' });
+  assert.equal(model.field('reviewProgress').hidden, true);
+  assert.equal(model.field('cancelReview').hidden, false);
+  assert.equal(model.timerCount(), 0);
+});
+
+test('rewriting uses a selected model without tools, and errors/cancellation leave prompt drafts unchanged', async () => {
+  const requests = [];
+  const instance = host({ selectRunModel: async () => ({ id: 'writer' }),
+    runWithVsCode: async (api, request, model, token, options) => {
+      requests.push({ request, options });
+      return { model: model.id, response: JSON.stringify({ prompt: 'Edited draft', summary: 'Adds evidence grounding.' }), usageTurns: [] };
+    } });
+  const source = { ...experiment(), comparisonKind: 'prompt', baseline: { prompt: 'Original' }, candidate: { prompt: 'Edited' } };
+  await instance.send({ type: 'generatePrompt', experiment: source, revision: 42, guidance: { goal: 'Ground findings' } });
+  assert.deepEqual(instance.errors, []);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].options, undefined);
+  assert.equal(instance.evaluations(), 0);
+  assert.equal(instance.historyEntries.length, 0);
+  const draft = instance.messages.find(message => message.type === 'optimizerDraft');
+  assert.equal(draft.revision, 42);
+  assert.equal(draft.draft.prompt, 'Edited draft');
+  assert.equal(source.baseline.prompt, 'Original');
+  assert.ok(instance.messages.some(message => message.type === 'busy' && message.kind === 'optimizer'));
+  const failed = host({ selectRunModel: async () => ({ id: 'writer' }),
+    runWithVsCode: async () => { throw new Error('Writer unavailable'); } });
+  await failed.send({ type: 'generatePrompt', experiment: source });
+  assert.match(failed.messages.find(m => m.type === 'optimizerStatus').message, /Writer unavailable/);
+  assert.ok(!failed.messages.some(m => m.type === 'optimizerDraft'));
+  const cancelled = host({ selectRunModel: async () => undefined });
+  await cancelled.send({ type: 'generatePrompt', experiment: source });
+  assert.match(cancelled.messages.find(m => m.type === 'optimizerStatus').message, /cancelled/);
+});
+
+test('shared-evidence prompt tests collect once and replay exact raw results without tools to either variant', async () => {
+  const requests = [];
+  const requirements = [];
+  const instance = host({
+    resolveRunModels: async (api, variants, options) => {
+      requirements.push(options.requireTools);
+      return { baseline: { id: 'shared' }, candidate: { id: 'shared' } };
+    },
+    runWithVsCode: async (api, request, model, token, options) => {
+      requests.push({ request, options });
+      if (options?.tools) {
+        return { ...request, model: 'shared', elapsedMs: 1, inputTokens: 10, outputTokens: 2,
+          ...(options.conversation.some(m => m.role === 'tool') ? { response: 'Snapshot collected.' }
+            : { toolCalls: [{ callId: 'snapshot', name: 'search_datadog_logs', input: { query: 'example' } }] }) };
+      }
+      assert.match(request.prompt, /RAW_SNAPSHOT_401/);
+      assert.match(request.prompt, /No live tools are available/);
+      assert.equal(options.tokenAwareInput, true);
+      return { ...request, response: 'Output for ' + (request.prompt.includes('Original instructions') ? 'original' : 'edited'),
+        elapsedMs: 1, inputTokens: 7, outputTokens: 3, usageTurns: [{ model: 'shared', inputTokens: 7, outputTokens: 3 }] };
+    }
+  });
+  class LanguageModelTextPart { constructor(value) { this.value = value; } }
+  instance.vscode.LanguageModelTextPart = LanguageModelTextPart;
+  let toolCalls = 0;
+  let approvals = 0;
+  instance.vscode.lm = {
+    tools: [{ name: 'search_datadog_logs', inputSchema: { type: 'object' } }],
+    invokeTool: async () => { toolCalls++; return { content: [new LanguageModelTextPart('RAW_SNAPSHOT_401')] }; }
+  };
+  instance.vscode.window.showWarningMessage = async () => { approvals++; return 'Approve for this test'; };
+  const source = { prompt: '', incomingMessage: 'Investigate service:example', comparisonKind: 'prompt', comparisonMode: 'model-prompt-only',
+    evidence: '', baseline: { provider: 'vscode', model: 'shared', prompt: 'Original instructions' },
+    candidate: { provider: 'vscode', model: 'shared', prompt: 'Edited instructions' }, test: { repetitions: 2 } };
+  await instance.send({ type: 'orchestrate', experiment: source });
+  assert.deepEqual(instance.errors, []);
+  assert.equal(toolCalls, 1);
+  assert.equal(approvals, 1);
+  assert.equal(requests.filter(r => r.options?.tools).length, 2);
+  assert.equal(requests.filter(r => !r.options?.tools).length, 4);
+  const completed = instance.messages.findLast(m => m.type === 'testFinished').experiment;
+  assert.equal(completed.comparisonMode, 'model-prompt-only');
+  assert.equal(completed.evidenceCollection.modelRequestCount, 2);
+  assert.equal(completed.evidenceCollection.toolCallCount, 1);
+  assert.equal(completed.testRun.status, 'completed');
+  const { summarizeTest, validateTestRecord } = require('../src/orchestration');
+  const summary = summarizeTest(completed.testRun);
+  assert.equal(summary.metrics.baseline.inputTokens, 14);
+  assert.equal(summary.metrics.candidate.inputTokens, 14);
+  assert.equal(summary.metrics.baseline.toolCallCount, 0);
+  assert.equal(summary.metrics.candidate.toolCallCount, 0);
+  assert.deepEqual(validateTestRecord(completed.testRun), completed.testRun);
+  assert.equal(instance.historyEntries[0].experiment.evidenceCollection.toolCallCount, 1);
+  await instance.send({ type: 'orchestrate', experiment: completed });
+  assert.deepEqual(instance.errors, []);
+  assert.deepEqual(requirements, [true, false]);
+  assert.equal(toolCalls, 1, 'Replaying a saved snapshot must not query Datadog again');
+  assert.equal(approvals, 1);
+  const panel = webview(completed);
+  panel.field('b-prompt').value = 'Another edit';
+  panel.field('b-prompt').listeners.get('input')();
+  assert.equal(panel.state().evidence, completed.evidence, 'Prompt edits reuse the frozen snapshot');
+  panel.field('incomingMessage').value = 'A different alert';
+  panel.field('incomingMessage').listeners.get('input')();
+  assert.equal(panel.state().evidence, '', 'A new alert must not reuse the previous collected snapshot');
+  assert.equal(panel.state().evidenceCollection, undefined);
+  panel.click('promptFreshEvidence');
+  assert.equal(panel.messages.at(-1).type, 'orchestrate');
+  assert.equal(panel.messages.at(-1).experiment.evidence, '');
+});
+
+test('shared evidence collection errors and cancellation do not start either prompt', async () => {
+  const source = { comparisonKind: 'prompt', comparisonMode: 'model-prompt-only', incomingMessage: 'Example alert',
+    baseline: { provider: 'vscode', model: 'shared', prompt: 'Original' },
+    candidate: { provider: 'vscode', model: 'shared', prompt: 'Edited' } };
+  for (const cancel of [false, true]) {
+    let runs = 0;
+    let started;
+    const ready = new Promise(resolve => { started = resolve; });
+    const instance = host({ resolveRunModels: async () => ({ baseline: {}, candidate: {} }),
+      runWithVsCode: async (api, request, model, token, options) => {
+        runs++;
+        assert.ok(options.tools);
+        started();
+        if (!cancel) throw new Error('Datadog authentication failed');
+        return new Promise((resolve, reject) => token.onCancellationRequested(() => reject(new api.CancellationError())));
+      } });
+    instance.vscode.lm = { tools: [{ name: 'search_datadog_logs' }], invokeTool: async () => { throw new Error('Must not execute'); } };
+    instance.vscode.window.showWarningMessage = async () => 'Approve for this test';
+    const running = instance.send({ type: 'orchestrate', experiment: source });
+    await ready;
+    if (cancel) await instance.send({ type: 'cancelReview' });
+    await running;
+    assert.equal(runs, 1);
+    assert.equal(instance.evaluations(), 0);
+    assert.equal(instance.messages.some(m => m.type === 'testFinished'), false);
+    if (cancel) {
+      assert.deepEqual(instance.errors, []);
+      assert.match(instance.messages.findLast(m => m.type === 'reviewStatus').message, /Neither prompt was tested/);
+    } else assert.match(instance.errors[0], /authentication failed/);
+    assert.equal(instance.messages.at(-1).type === 'busy' ? instance.messages.at(-1).value : false, false);
+  }
+});
+
+test('identical prompts and missing shared collection input fail before any model calls', async () => {
+  let calls = 0;
+  const instance = host({ resolveRunModels: async () => { calls++; } });
+  const source = { comparisonKind: 'prompt', comparisonMode: 'model-prompt-only',
+    baseline: { provider: 'vscode', model: 'shared', prompt: 'Same' }, candidate: { provider: 'vscode', model: 'shared', prompt: 'Same' } };
+  await instance.send({ type: 'orchestrate', experiment: source });
+  assert.match(instance.errors[0], /Identical prompts/);
+  source.candidate.prompt = 'Different';
+  await instance.send({ type: 'orchestrate', experiment: source });
+  assert.match(instance.errors[1], /shared input/);
+  assert.equal(calls, 0);
 });
 
 test('prompt-tab agent loading targets only the requested variant and tabs cannot change comparison type during a run', async () => {
@@ -698,6 +1066,43 @@ test('prompt orchestration restores the prompt tab and both original variants th
   await instance.send({ type: 'compare', experiment: exported });
   assert.deepEqual(instance.errors, []);
   assert.ok(instance.messages.findLast(message => message.type === 'result').result.testRun);
+});
+
+test('prompt drafts save and reopen from history without responses, reviews or model requests', async () => {
+  const instance = host();
+  const input = { comparisonKind: 'prompt', comparisonMode: 'model-prompt-only', incomingMessage: 'Example input',
+    evidence: 'Frozen observations', baseline: { provider: 'vscode', model: 'shared', prompt: 'Original instructions' },
+    candidate: { provider: 'vscode', model: 'shared', prompt: 'Edited instructions' },
+    optimizer: { goal: 'Clearer instructions', draft: { prompt: 'Reviewed draft', summary: 'Keeps constraints.', usageTurns: [] } } };
+  const panel = webview(input);
+  assert.equal(panel.field('historySave').textContent, 'Save prompt comparison to History');
+  panel.click('historySave');
+  await instance.send(panel.messages.at(-1));
+  assert.deepEqual(instance.errors, []);
+  assert.equal(instance.historyEntries.length, 1);
+  assert.equal(instance.historyEntries[0].evaluation, null);
+  assert.match(instance.messages.find(m => m.type === 'historySaved').message, /Prompt draft saved.*No review/);
+  instance.vscode.window.showWarningMessage = async () => 'Open comparison';
+  await instance.send({ type: 'historyOpen', id: instance.historyEntries[0].id });
+  const restored = webview(experiment());
+  restored.receive(instance.messages.findLast(m => m.type === 'historyOpened'));
+  await instance.send(restored.messages.at(-1));
+  restored.receive(instance.messages.findLast(m => m.type === 'result'));
+  assert.equal(restored.field('promptTab').ariaSelected, 'true');
+  assert.equal(restored.field('b-prompt').value, input.candidate.prompt);
+  assert.equal(restored.field('evidence').value, input.evidence);
+  assert.equal(restored.field('optimizerDraft').value, 'Reviewed draft');
+  assert.equal(instance.evaluations(), 0);
+  restored.field('b-prompt').value = 'New edit';
+  restored.field('b-prompt').listeners.get('input')();
+  restored.click('historySave');
+  await instance.send(restored.messages.at(-1));
+  assert.equal(instance.historyEntries.length, 2);
+  assert.equal(instance.historyEntries[0].experiment.candidate.prompt, input.candidate.prompt);
+  assert.equal(instance.historyEntries[1].experiment.candidate.prompt, 'New edit');
+  await instance.send({ type: 'historySave', experiment: { comparisonKind: 'prompt', baseline: {}, candidate: {} } });
+  assert.match(instance.errors.at(-1), /Enter an original or edited prompt/);
+  assert.equal(instance.historyEntries.length, 2);
 });
 
 test('Orchestrate Test rejects missing evidence and cancelled selection before generation', async () => {

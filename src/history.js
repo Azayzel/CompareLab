@@ -37,7 +37,8 @@ function metadata(snapshot, bytes) {
     title: String(input.incomingMessage || input.prompt || input.baseline?.prompt || 'Untitled comparison').replace(/\s+/g, ' ').trim().slice(0, 120),
     comparisonKind: input.comparisonKind || 'model',
     baseline: String(input.baseline?.model || 'Unspecified model'), candidate: String(input.candidate?.model || 'Unspecified model'),
-    status: record?.status || (snapshot.evaluation ? 'reviewed' : 'saved'),
+    status: record?.status || (snapshot.evaluation ? 'reviewed' : input.comparisonKind === 'prompt' &&
+      !input.baseline?.response?.trim() && !input.candidate?.response?.trim() ? 'draft' : 'saved'),
     limited: Boolean(record?.pairs?.some(pair => ['baseline', 'candidate'].some(side => pair[side]?.result?.investigationBudget?.limited))),
     pairs: record?.pairs?.length ?? 0
   };
