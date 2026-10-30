@@ -1,9 +1,14 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { selectDatadogTools, runDatadogAgent, DATADOG_AGENT_PROMPT } = require('../src/datadog');
+const { selectTools, resolveTools, verifyReadOnlyTools, toolCatalog, runToolAgent: runVerifiedAgent, AGENT_PROMPT } = require('../src/tool-agent');
 
-const tool = { name: 'mcp_datadog_search_datadog_logs', description: 'Search Datadog logs',
+async function runToolAgent(vscode, input, tools, ...args) {
+  const verified = await verifyReadOnlyTools(vscode, tools);
+  return runVerifiedAgent(vscode, input, verified, ...args);
+}
+
+const tool = { name: 'mcp_observability_search_logs', description: 'Search logs',
   inputSchema: { type: 'object', properties: { query: { type: 'string' } } } };
 const call = (name = tool.name) => ({ callId: 'call-1', name, input: { query: 'service:api' } });
 
@@ -29,77 +34,80 @@ function api() {
     window: { showQuickPick: async items => items, showWarningMessage: async () => 'Allow request' } };
 }
 
-test('automatically enables recognized Datadog capabilities without a picker and rejects unavailable tools', async () => {
+test('picker exposes all tools without guessing server identity or operation safety', async () => {
   const vscode = api();
-  vscode.window.showQuickPick = async () => { throw new Error('No tool picker should be needed'); };
-  const dangerous = ['execute_code', 'delete_datadog_notebook', 'create_datadog_notebook', 'search_new_write_tool']
-    .map(name => ({ ...tool, name: 'mcp_datadog_' + name }));
-  const guides = ['list_datadog_skills', 'load_datadog_skill'].map(name => ({ ...tool, name: 'mcp_datadog_' + name }));
-  vscode.lm.tools.push(...dangerous, ...guides);
-  const confirmations = [];
-  vscode.window.showWarningMessage = async (message, options) => {
-    confirmations.push(options.detail);
-    return 'Approve for this test';
+  vscode.lm.tools.push({ ...tool, name: 'execute_code', tags: ['workspace'] });
+  vscode.window.showQuickPick = async (items, options) => {
+    assert.equal(options.canPickMany, true);
+    assert.equal(options.matchOnDetail, true);
+    assert.deepEqual(items.map(item => item.label), vscode.lm.tools.map(tool => tool.name));
+    assert.deepEqual(items.map(item => item.picked), [true, false, false]);
+    return [items[0], items[2]];
   };
-  assert.deepEqual(await selectDatadogTools(vscode), { tools: [tool, ...guides],
-    approvedReadOnlyTools: new Set([tool.name, ...guides.map(tool => tool.name)]) });
-  assert.equal(confirmations.length, 1);
-  assert.match(confirmations[0], /Automatically enabled: Query guides, Logs/);
-  for (const entry of dangerous) assert.doesNotMatch(confirmations[0], new RegExp(entry.name));
-  vscode.lm.tools = [{ name: 'github_search' }];
-  await assert.rejects(selectDatadogTools(vscode), /No Datadog MCP tools/);
-  vscode.lm.tools = guides;
-  await assert.rejects(selectDatadogTools(vscode), /no recognized investigation query tools/);
-  vscode.lm.tools = [tool];
-  vscode.window.showWarningMessage = async () => undefined;
-  assert.equal(await selectDatadogTools(vscode), undefined);
+  assert.deepEqual(await selectTools(vscode, [tool.name]), [tool.name, 'execute_code']);
+  assert.equal(vscode.invocations.length, 0);
+  vscode.window.showQuickPick = async () => undefined;
+  assert.equal(await selectTools(vscode), undefined);
+  vscode.window.showQuickPick = async () => [];
+  assert.deepEqual(await selectTools(vscode), []);
+  vscode.lm.tools = [];
+  await assert.rejects(selectTools(vscode), /No VS Code tools/);
 });
 
-test('recognizes VS Code generated, shortened, numbered and legacy names without changing invocation IDs', async () => {
-  const prefixes = ['mcp_datadog_', 'mcp_datadog_mcp_s_', 'mcp_datadog_mcp_2_', 'mcp_datadog2_',
-    'mcp_observability_', 'mcp_a1b2c3d4_', 'mcp__datadog__', 'datadog-'];
-  for (const prefix of prefixes) {
+test('uses exact selected names from arbitrary providers without auto-enabling other tools', async () => {
+  for (const name of ['mcp_github_search', 'workspace_read_file', 'opaque_id', 'mcp_datadog_search_datadog_logs']) {
     const vscode = api();
-    const names = ['search_datadog_logs', 'get_datadog_metric', 'aggregate_spans',
-      'get_change_stories', 'list_datadog_skills', 'load_datadog_skill'];
-    vscode.lm.tools = names.map(name => ({ ...tool, name: prefix + name }));
-    vscode.lm.tools.push({ ...tool, name: prefix + 'execute_code' }, { ...tool, name: prefix + 'search_datadog_logs_delete' },
-      { ...tool, name: 'mcp_github_aggregate_spans' });
+    vscode.lm.tools = [{ ...tool, name }, { ...tool, name: 'not_selected' }];
     let approvals = 0;
-    vscode.window.showWarningMessage = async () => { approvals++; return 'Approve for this test'; };
-    const selection = await selectDatadogTools(vscode);
-    assert.deepEqual(selection.tools.map(tool => tool.name), names.map(name => prefix + name), prefix);
+    vscode.window.showWarningMessage = async () => { approvals++; return 'Allow request'; };
+    const tools = resolveTools(vscode, [name]);
+    assert.deepEqual(tools.map(tool => tool.name), [name]);
     let round = 0;
-    const result = await runDatadogAgent(vscode, { prompt: 'Investigate' }, selection.tools,
-      async () => ++round === 1 ? { toolCalls: [call(prefix + 'search_datadog_logs')] } : { response: '401 increased' },
-      undefined, undefined, selection.approvedReadOnlyTools);
-    assert.equal(vscode.invocations[0].name, prefix + 'search_datadog_logs');
-    assert.equal(result.toolEvidence[0].tool, prefix + 'search_datadog_logs');
+    const result = await runToolAgent(vscode, { prompt: 'Investigate' }, tools,
+      async () => ++round === 1 ? { toolCalls: [call(name)] } : { response: '401 increased' });
+    assert.equal(vscode.invocations[0].name, name);
+    assert.equal(result.toolEvidence[0].tool, name);
     assert.equal(approvals, 1);
+    assert.deepEqual(result.toolCatalog, tools);
   }
 });
 
-test('recognizes raw Datadog operation names without auto-enabling unrelated generic tools', async () => {
+test('saved selections are revalidated and catalogs snapshot schemas', () => {
   const vscode = api();
-  vscode.lm.tools = ['search_datadog_logs', 'load_datadog_skill', 'execute_code', 'aggregate_spans',
-    'custom_search_datadog_logs'].map(name => ({ ...tool, name }));
-  vscode.window.showWarningMessage = async () => 'Approve for this test';
-  const selection = await selectDatadogTools(vscode);
-  assert.deepEqual(selection.tools.map(tool => tool.name), ['search_datadog_logs', 'load_datadog_skill']);
+  assert.throws(() => resolveTools(vscode, []), /Select tools/);
+  assert.throws(() => resolveTools(vscode, [tool.name, tool.name]), /Invalid selected tool names/);
+  assert.throws(() => resolveTools(vscode, ['removed']), /no longer available.*no tools were substituted/);
+  const catalog = resolveTools(vscode, [tool.name]);
+  catalog[0].inputSchema.properties.query.type = 'number';
+  assert.equal(tool.inputSchema.properties.query.type, 'string');
 });
 
-test('discovery errors report bounded tool names without claiming connectivity or dumping schemas', async () => {
+test('changed or removed tools fail before invocation, including changes during confirmation', async () => {
+  for (const remove of [false, true]) {
+    const vscode = api();
+    vscode.window.showWarningMessage = async () => {
+      vscode.lm.tools = remove ? [] : [{ ...tool, description: 'Changed description' }];
+      return 'Allow request';
+    };
+    await assert.rejects(runToolAgent(vscode, { prompt: 'Task' }, [tool],
+      async () => ({ toolCalls: [call()] })), /changed during the run|No VS Code tools/);
+    assert.equal(vscode.invocations.length, 0);
+  }
+});
+
+test('a denied follow-up retains earlier tool activity without presenting a successful answer', async () => {
   const vscode = api();
-  vscode.lm.tools = Array.from({ length: 25 }, (_, i) => ({
-    ...tool, name: 'mcp_datadog_unknown_' + i, description: 'DO_NOT_LOG', inputSchema: { secret: 'DO_NOT_LOG' }
-  }));
-  await assert.rejects(selectDatadogTools(vscode), error => {
-    assert.match(error.message, /no recognized investigation query tools/);
-    assert.match(error.message, /mcp_datadog_unknown_0/);
-    assert.match(error.message, /first 20 of 25/);
-    assert.doesNotMatch(error.message, /DO_NOT_LOG|mcp_datadog_unknown_24|MCP is connected/);
+  let approvals = 0;
+  vscode.window.showWarningMessage = async () => ++approvals === 1 ? 'Allow request' : undefined;
+  await assert.rejects(runToolAgent(vscode, { provider: 'vscode', model: 'shared', prompt: 'Task', runLabel: 'Original prompt' }, [tool],
+    async () => ({ toolCalls: [call()], inputTokens: 10, outputTokens: 2 })), error => {
+    assert.ok(error instanceof vscode.CancellationError);
+    assert.equal(error.partialResult.toolEvidence.length, 1);
+    assert.equal(error.partialResult.response, '');
+    assert.equal(error.partialResult.usageTurns.length, 2);
     return true;
   });
+  assert.equal(vscode.invocations.length, 1);
 });
 
 test('each investigation has a private conversation and retains actual tool inputs and results', async () => {
@@ -107,7 +115,7 @@ test('each investigation has a private conversation and retains actual tool inpu
   const conversations = [];
   for (const side of ['baseline', 'candidate']) {
     let turns = 0;
-    const result = await runDatadogAgent(vscode, { prompt: 'Investigate', systemPrompt: 'Instructions' }, [tool], async conversation => {
+    const result = await runToolAgent(vscode, { prompt: 'Investigate', systemPrompt: 'Instructions' }, [tool], async conversation => {
       conversations.push(structuredClone(conversation));
       return ++turns === 1 ? { response: '', toolCalls: [call()], inputTokens: 10, outputTokens: 2 }
         : { response: side + ' answer', toolCalls: [], inputTokens: 20, outputTokens: 5 };
@@ -123,7 +131,7 @@ test('each investigation has a private conversation and retains actual tool inpu
   }
   assert.deepEqual(conversations[0], conversations[2]);
   assert.equal(conversations[0].length, 3);
-  assert.equal(conversations[0][2].content, DATADOG_AGENT_PROMPT);
+  assert.equal(conversations[0][2].content, AGENT_PROMPT);
   assert.equal(JSON.parse(conversations[1].findLast(message => message.role === 'tool').content).content, 'HTTP 401 increased');
   assert.equal(vscode.invocations.length, 2);
   assert.equal(vscode.invocations[0].options.toolInvocationToken, undefined);
@@ -131,10 +139,10 @@ test('each investigation has a private conversation and retains actual tool inpu
 
 test('does not accept fabricated model evidence or invoke unapproved tools', async () => {
   const vscode = api();
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
-    async () => ({ response: 'I checked Datadog' })), /did not query Datadog MCP data/);
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
-    async () => ({ toolCalls: [call('github_search')] })), /unapproved Datadog tool/);
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, [tool],
+    async () => ({ response: 'I checked the data' })), /did not obtain successful tool results/);
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, [tool],
+    async () => ({ toolCalls: [call('github_search')] })), /unselected tool/);
   assert.equal(vscode.invocations.length, 0);
 });
 
@@ -153,10 +161,10 @@ test('candidate usage and activity exclude baseline and evaluator activity acros
     runVariant: (input, side) => {
       let turns = 0;
       const multiplier = side === 'baseline' ? 1 : 2;
-      return runDatadogAgent(vscode, input, [tool], async conversation => {
+      return runToolAgent(vscode, input, [tool], async conversation => {
         turns++;
         if (turns === 1) assert.deepEqual(conversation, [
-          { role: 'user', content: input.prompt }, { role: 'user', content: DATADOG_AGENT_PROMPT }
+          { role: 'user', content: input.prompt }, { role: 'user', content: AGENT_PROMPT }
         ]);
         for (const message of conversation.filter(message => message.role === 'tool')) {
           assert.equal(JSON.parse(message.content).input.query, side);
@@ -183,56 +191,86 @@ test('candidate usage and activity exclude baseline and evaluator activity acros
   assert.equal(summary.efficiency[0].value, '2.00x baseline');
 });
 
-test('one approval covers both models and all pairs but never carries to the next test', async () => {
+test('every invocation across both models and all pairs needs separate confirmation', async () => {
   const vscode = api();
   let approvals = 0;
-  vscode.window.showWarningMessage = async () => { approvals++; return 'Approve for this test'; };
-  const selection = await selectDatadogTools(vscode);
+  vscode.window.showWarningMessage = async () => { approvals++; return 'Allow request'; };
+  const tools = resolveTools(vscode, [tool.name]);
   for (let i = 0; i < 6; i++) {
     let round = 0;
-    await runDatadogAgent(vscode, { prompt: 'Investigate' }, selection.tools,
-      async () => ++round === 1 ? { toolCalls: [call()] } : { response: '401 increased' },
-      undefined, undefined, selection.approvedReadOnlyTools);
+    await runToolAgent(vscode, { prompt: 'Investigate' }, tools,
+      async () => ++round === 1 ? { toolCalls: [call()] } : { response: '401 increased' });
   }
-  assert.equal(approvals, 1);
+  assert.equal(approvals, 6);
   assert.equal(vscode.invocations.length, 6);
   vscode.window.showWarningMessage = async () => { approvals++; return undefined; };
-  assert.equal(await selectDatadogTools(vscode), undefined);
-  assert.equal(approvals, 2);
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, tools,
+    async () => ({ toolCalls: [call()] })), vscode.CancellationError);
+  assert.equal(approvals, 7);
   assert.equal(vscode.invocations.length, 6);
 });
 
-test('per-call mode and unsafe operations cannot bypass approval', async () => {
+test('unverified tools are excluded even when selected and per-call approval would allow them', async () => {
   const vscode = api();
-  vscode.window.showWarningMessage = async () => 'Review every request';
-  const selection = await selectDatadogTools(vscode);
-  assert.equal(selection.approvedReadOnlyTools.size, 0);
-  vscode.window.showWarningMessage = async () => undefined;
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, selection.tools,
-    async () => ({ toolCalls: [call()] }), undefined, undefined, selection.approvedReadOnlyTools), vscode.CancellationError);
-  const unsafe = { ...tool, name: 'mcp_datadog_execute_code' };
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [unsafe],
-    async () => ({ toolCalls: [call(unsafe.name)] }), undefined, undefined, new Set([unsafe.name])), /unapproved Datadog tool/);
+  const unsafe = { ...tool, name: 'execute_code' };
+  vscode.lm.tools.push(unsafe);
+  vscode.window.showQuickPick = async (items, options) => {
+    assert.match(options.title, /verified are read-only/);
+    assert.ok(items.every(item => item.picked === false));
+    return [items[0]];
+  };
+  const verified = await verifyReadOnlyTools(vscode, [tool, unsafe]);
+  assert.deepEqual(verified.map(tool => tool.name), [tool.name]);
+  await assert.rejects(runVerifiedAgent(vscode, { prompt: 'Investigate' }, verified,
+    async (conversation, tools) => {
+      assert.deepEqual(tools.map(tool => tool.name), [tool.name]);
+      return { toolCalls: [call(unsafe.name)] };
+    }), /unselected tool/);
+  assert.equal(vscode.invocations.length, 0);
+  vscode.window.showQuickPick = async () => [];
+  await assert.rejects(verifyReadOnlyTools(vscode, [tool]), /No tools were verified read-only/);
+  vscode.window.showQuickPick = async () => undefined;
+  assert.equal(await verifyReadOnlyTools(vscode, [tool]), undefined);
+});
+
+test('saved catalogs and confirmations cannot substitute for fresh read-only verification', async () => {
+  const vscode = api();
+  for (const tools of [[tool], JSON.parse(JSON.stringify([tool]))]) {
+    await assert.rejects(runVerifiedAgent(vscode, { prompt: 'Task' }, tools,
+      async () => { throw new Error('Must not send a model request'); }), /freshly verified read-only/);
+  }
+  const verified = await verifyReadOnlyTools(vscode, [tool]);
+  await assert.rejects(runVerifiedAgent(vscode, { prompt: 'Task' }, structuredClone(verified),
+    async () => ({})), /freshly verified read-only/);
+  verified[0].description = 'Changed';
+  await assert.rejects(runVerifiedAgent(vscode, { prompt: 'Task' }, verified,
+    async () => ({})), /freshly verified read-only/);
   assert.equal(vscode.invocations.length, 0);
 });
 
-test('query guides alone cannot masquerade as incident evidence', async () => {
+test('verified tools retain per-request consent and a non-overridable read-only policy', async () => {
   const vscode = api();
-  const guide = { ...tool, name: 'mcp_datadog_mcp_s_load_datadog_skill' };
   let round = 0;
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [guide],
-    async () => ++round === 1 ? { toolCalls: [call(guide.name)] } : { response: 'The service failed.' },
-    undefined, undefined, new Set([guide.name])), /Query guides alone are not evidence/);
+  vscode.window.showWarningMessage = async (message, options) => {
+    assert.match(options.detail, /marked this tool read-only/);
+    assert.match(options.detail, /Deny any request.*change shared state/);
+    return 'Allow request';
+  };
+  await runToolAgent(vscode, { prompt: 'Read the task data' }, [tool],
+    async () => ++round === 1 ? { toolCalls: [call()] } : { response: 'Done' });
+  assert.equal(vscode.invocations.length, 1);
+  assert.match(AGENT_PROMPT, /Guides describe usage, not verified facts/);
+  assert.match(AGENT_PROMPT, /Never request mutations/);
 });
 
 test('requires approval for every invocation and respects cancellation', async () => {
   const vscode = api();
   vscode.window.showWarningMessage = async () => undefined;
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, [tool],
     async () => ({ toolCalls: [call()] })), vscode.CancellationError);
   const source = new vscode.CancellationTokenSource();
   source.cancel();
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, [tool],
     async () => { throw new Error('Must not run'); }, source.token), vscode.CancellationError);
   assert.equal(vscode.invocations.length, 0);
 });
@@ -240,11 +278,16 @@ test('requires approval for every invocation and respects cancellation', async (
 test('tool errors, unsupported results and empty results still fail visibly', async () => {
   const vscode = api();
   const turn = async () => ({ toolCalls: [call()] });
-  vscode.lm.invokeTool = async () => { throw new Error('Datadog authentication failed'); };
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], turn), /Datadog authentication failed/);
+  vscode.lm.invokeTool = async () => { throw new Error('Tool authentication failed'); };
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, [tool], turn), error => {
+    assert.match(error.message, /Tool authentication failed/);
+    assert.equal(error.partialResult.toolEvidence[0].isError, true);
+    assert.match(error.partialResult.toolEvidence[0].content, /side effects may have occurred/);
+    return true;
+  });
   for (const content of [[], [{}], [new vscode.LanguageModelTextPart(' ')]]) {
     vscode.lm.invokeTool = async () => ({ content });
-    await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], turn), /must return text|empty text/);
+    await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, [tool], turn), /must return text|empty text/);
   }
 });
 
@@ -262,6 +305,7 @@ test('invalid event arguments return the full schema for correction without chan
   const rejection = 'MPC -32602: validating "arguments": validating root: unexpected additional properties ["limit"]. ' +
     'Valid fields: from, max_tokens, query, sort, start_at, to. max_tokens is an output token budget, not a row limit.';
   const attempts = [];
+  vscode.lm.tools.push(events);
   vscode.lm.invokeTool = async (name, { input }) => {
     attempts.push({ name, input: structuredClone(input) });
     if (Object.hasOwn(input, 'limit')) throw new Error(rejection);
@@ -269,9 +313,9 @@ test('invalid event arguments return the full schema for correction without chan
   };
   let turn = 0;
   const progress = [];
-  const result = await runDatadogAgent(vscode, { prompt: 'Investigate', model: 'test-model' }, [events, tool],
+  const result = await runToolAgent(vscode, { prompt: 'Investigate', model: 'test-model' }, [events, tool],
     async (conversation, tools) => {
-      assert.deepEqual(tools, [events, tool]);
+      assert.deepEqual(tools, toolCatalog([events, tool]));
       turn++;
       const usage = { inputTokens: 10, outputTokens: 2 };
       if (turn === 1) return { ...usage, toolCalls: [
@@ -287,7 +331,7 @@ test('invalid event arguments return the full schema for correction without chan
       if (turn === 2) return { ...usage, toolCalls: [{ callId: 'corrected', name: events.name, input: corrected }] };
       assert.equal(JSON.parse(feedback[2].content).isError, undefined);
       return { ...usage, response: 'Evidence-based answer' };
-    }, undefined, message => progress.push(message), new Set([events.name, tool.name]));
+    }, undefined, message => progress.push(message));
   assert.deepEqual(attempts, [{ name: events.name, input: invalid }, { name: tool.name, input: call().input },
     { name: events.name, input: corrected }]);
   assert.equal(result.toolEvidence.length, 3);
@@ -304,7 +348,7 @@ test('repeating rejected arguments stops visibly even if object keys are reorder
   const vscode = api();
   let requests = 0;
   vscode.lm.invokeTool = async () => { throw Object.assign(new Error('Invalid params'), { code: -32602 }); };
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async () => ({
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, [tool], async () => ({
     toolCalls: [{ ...call(), input: ++requests === 1 ? { query: 'service:api', limit: 10 } : { limit: 10, query: 'service:api' } }]
   })), /rejected the same arguments again after correction feedback: Invalid params/);
   assert.equal(requests, 2);
@@ -314,9 +358,9 @@ test('argument errors alone cannot qualify as incident evidence', async () => {
   const vscode = api();
   vscode.lm.invokeTool = async () => { throw new Error('MCP error -32602: Invalid arguments'); };
   let requests = 0;
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, [tool],
     async () => ++requests === 1 ? { toolCalls: [call()] } : { response: 'Unsupported conclusion' }),
-  /did not query Datadog MCP data/);
+  /did not obtain successful tool results/);
   assert.equal(requests, 2);
 });
 
@@ -327,7 +371,7 @@ test('duplicate rejected calls in one batch receive feedback before repeat detec
     if (input.limit) return { isError: true, content: [new vscode.LanguageModelTextPart('MCP -32602: Invalid arguments')] };
     return { content: [new vscode.LanguageModelTextPart('Actual evidence')] };
   };
-  const result = await runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async conversation => {
+  const result = await runToolAgent(vscode, { prompt: 'Investigate' }, [tool], async conversation => {
     requests++;
     if (requests === 1) return { toolCalls: ['one', 'two'].map(callId => ({
       ...call(), callId, input: { query: 'example', limit: 1 }
@@ -345,24 +389,24 @@ test('duplicate rejected calls in one batch receive feedback before repeat detec
 test('fatal tool results, provider failures and cancellation are not argument recovery', async () => {
   const vscode = api();
   vscode.lm.invokeTool = async () => ({ isError: true, content: [new vscode.LanguageModelTextPart('Permission denied')] });
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, [tool],
     async () => ({ toolCalls: [call()] })), /Permission denied/);
   const providerError = Object.assign(new Error('Model rejected its request'), { code: -32602 });
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, [tool],
     async () => { throw providerError; }), error => error === providerError);
   const source = new vscode.CancellationTokenSource();
   vscode.lm.invokeTool = async () => {
     source.cancel();
     throw Object.assign(new Error('Invalid params'), { code: -32602 });
   };
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, [tool],
     async () => ({ toolCalls: [call()] }), source.token), vscode.CancellationError);
 });
 
 test('investigations continue past six model requests until the model answers', async () => {
   const vscode = api();
   let requests = 0;
-  const result = await runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool],
+  const result = await runToolAgent(vscode, { prompt: 'Investigate' }, [tool],
     async (messages, tools) => {
       assert.equal(tools.length, 1);
       return ++requests <= 12 ? { toolCalls: [call()] } : { response: 'Complete investigation.' };
@@ -377,7 +421,7 @@ test('executes every approved call in a batch larger than eight without forcing 
   const vscode = api();
   const turns = [];
   const progress = [];
-  const result = await runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async (messages, tools) => {
+  const result = await runToolAgent(vscode, { prompt: 'Investigate' }, [tool], async (messages, tools) => {
     turns.push(structuredClone(messages));
     if (turns.length === 1) return { toolCalls: Array.from({ length: 9 }, (_, i) => ({ ...call(), callId: 'call-' + i })) };
     assert.equal(tools.length, 1);
@@ -399,7 +443,7 @@ test('executes every approved call in a batch larger than eight without forcing 
 test('sums actual and estimated token counts across every model turn', async () => {
   const vscode = api();
   let requests = 0;
-  const result = await runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async (messages, tools) => {
+  const result = await runToolAgent(vscode, { prompt: 'Investigate' }, [tool], async (messages, tools) => {
     requests++;
     assert.equal(tools.length, 1);
     return { ...(requests <= 7 ? { toolCalls: [call()] } : { response: 'Answer.' }),
@@ -421,7 +465,7 @@ test('large results are retained and sent in full without CompareLab truncation'
   const original = 'HTTP 401 increased.\n' + 'x'.repeat(100000) + 'OMITTED_CONTENT';
   vscode.lm.invokeTool = async () => ({ content: [new vscode.LanguageModelTextPart(original)] });
   let requests = 0;
-  const result = await runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async messages => {
+  const result = await runToolAgent(vscode, { prompt: 'Investigate' }, [tool], async messages => {
     if (++requests === 1) return { toolCalls: [call()] };
     assert.match(JSON.stringify(messages), /OMITTED_CONTENT/);
     const retained = JSON.parse(messages.findLast(message => message.role === 'tool').content);
@@ -439,7 +483,7 @@ test('full results preserve text including surrogate pairs at the former truncat
     const vscode = api();
     vscode.lm.invokeTool = async () => ({ content: [new vscode.LanguageModelTextPart(original)] });
     let requests = 0;
-    const result = await runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async () =>
+    const result = await runToolAgent(vscode, { prompt: 'Investigate' }, [tool], async () =>
       ++requests === 1 ? { toolCalls: [call()] } : { response: 'Answer from retained evidence.' });
     const retained = result.toolEvidence[0];
     assert.equal(retained.content, original);
@@ -455,7 +499,7 @@ test('retains more than 50,000 evidence characters including JSON escaping and m
     return { content: [new vscode.LanguageModelTextPart(original)] };
   };
   let requests = 0;
-  const result = await runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async (messages, tools) => {
+  const result = await runToolAgent(vscode, { prompt: 'Investigate' }, [tool], async (messages, tools) => {
     if (++requests === 1) return { toolCalls: Array.from({ length: 8 }, (_, i) => ({
       ...call(), callId: 'call-' + i, input: { query: 'q'.repeat(1000) }
     })) };
@@ -471,9 +515,10 @@ test('passes max_tokens through unchanged, leaving result sizing to the model an
   for (const maxTokens of [undefined, 0, 10000, 200]) {
     const vscode = api();
     const queryTool = { ...tool, inputSchema: { type: 'object', properties: { max_tokens: { type: 'integer', minimum: 0 } } } };
+    vscode.lm.tools = [queryTool];
     const input = { query: 'service:api', ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}) };
     let requests = 0;
-    const result = await runDatadogAgent(vscode, { prompt: 'Investigate' }, [queryTool], async () =>
+    const result = await runToolAgent(vscode, { prompt: 'Investigate' }, [queryTool], async () =>
       ++requests === 1 ? { toolCalls: [{ ...call(), input }] } : { response: 'HTTP 401 increased.' });
     assert.equal(vscode.invocations[0].options.input.max_tokens, maxTokens);
     assert.equal(result.toolEvidence[0].input.max_tokens, maxTokens);
@@ -494,7 +539,7 @@ test('investigations can run beyond three minutes without an exploration or tota
     }
     return { content: [new vscode.LanguageModelTextPart('401 increased')] };
   };
-  const result = await runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async (messages, tools, token) => {
+  const result = await runToolAgent(vscode, { prompt: 'Investigate' }, [tool], async (messages, tools, token) => {
     requests++;
     if (requests <= 2) return { toolCalls: [call()] };
     assert.equal(tools.length, 1);
@@ -511,7 +556,7 @@ test('investigations can run beyond three minutes without an exploration or tota
 test('a missing usage count in any turn remains unknown rather than becoming a partial total', async () => {
   const vscode = api();
   let requests = 0;
-  const result = await runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async (messages, tools, token) => {
+  const result = await runToolAgent(vscode, { prompt: 'Investigate' }, [tool], async (messages, tools, token) => {
     requests++;
     if (requests === 1) return { toolCalls: [call()], inputTokens: 10, outputTokens: 10 };
     return { response: '401 increased.', estimatedInputTokens: 10, estimatedOutputTokens: 10 };
@@ -529,7 +574,7 @@ test('user cancellation stops a pending provider that ignores the cancellation t
   const modelReady = new Promise(resolve => { modelStarted = resolve; });
   const parent = new vscode.CancellationTokenSource();
   let requests = 0;
-  const pending = runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async (messages, tools, token) => {
+  const pending = runToolAgent(vscode, { prompt: 'Investigate' }, [tool], async (messages, tools, token) => {
     requests++;
     if (requests === 1) return { toolCalls: [call()] };
     modelStarted();
@@ -545,7 +590,7 @@ test('user cancellation stops a pending provider that ignores the cancellation t
 test('user cancellation fails instead of manufacturing a final answer', async () => {
   const vscode = api();
   const parent = new vscode.CancellationTokenSource();
-  await assert.rejects(runDatadogAgent(vscode, { prompt: 'Investigate' }, [tool], async () => {
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Investigate' }, [tool], async () => {
     parent.cancel();
     return { response: 'Must not be accepted' };
   }, parent.token), vscode.CancellationError);

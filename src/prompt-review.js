@@ -97,7 +97,7 @@ function promptDecision(result) {
       : 'The reviewed results do not establish a consistent, supported prompt improvement.',
     changes: [...new Map(changes.map(change => [change.change, change])).values()].slice(0, 3),
     caveat: result.comparisonMode === 'end-to-end'
-      ? 'Independent Datadog investigations may find different evidence. This is a task-specific recommendation, not proof the edit caused the difference.'
+      ? 'Independent tool-enabled runs may find different evidence or change shared state. This is a task-specific recommendation, not proof the edit caused the difference.'
       : 'One input does not establish a universal improvement. Test representative inputs before adoption.'
   };
 }

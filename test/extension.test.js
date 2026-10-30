@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { evaluationKey } = require('../src/copilot');
 const { reviewPacket } = require('../src/core');
-const { DATADOG_AGENT_PROMPT } = require('../src/datadog');
+const { AGENT_PROMPT } = require('../src/tool-agent');
 
 function host(overrides = {}, providerOverrides = {}, historyOverrides = {}) {
   const messages = [];
@@ -48,6 +48,7 @@ function host(overrides = {}, providerOverrides = {}, historyOverrides = {}) {
         onDidReceiveMessage: callback => { handler = callback; }
       } }),
       showErrorMessage: message => errors.push(message), showSaveDialog: async () => 'report.md',
+      showQuickPick: async items => items.filter(item => item.tool),
       withProgress: async (options, callback) => callback({ report() {} }, { onCancellationRequested: () => disposable })
     },
     workspace: { fs: { writeFile: async (uri, bytes) => files.push(bytes.toString()) } },
@@ -144,6 +145,128 @@ function runExport() {
 
 const descendants = node => [node, ...(node.children || []).flatMap(descendants)];
 const visibleText = node => [node.textContent || '', ...(node.children || []).map(visibleText)].join(' ');
+
+test('native tool selection persists independent drafts and never invokes a tool or saves approval', async () => {
+  const instance = host();
+  instance.vscode.lm = { tools: [{ name: 'mcp_search', description: 'Search', inputSchema: { type: 'object' }, tags: ['mcp'] }],
+    invokeTool: async () => { throw new Error('Selection must not invoke tools'); } };
+  const panel = webview(experiment());
+  panel.click('selectTools');
+  await instance.send(panel.messages.at(-1));
+  const selection = instance.messages.findLast(message => message.type === 'toolsSelected');
+  panel.receive(selection);
+  assert.deepEqual(Array.from(panel.state().toolSelection), ['mcp_search']);
+  assert.match(panel.field('toolSelectionSummary').textContent, /Shared tools.*mcp_search/);
+  panel.click('promptTab');
+  panel.receive({ type: 'toolsSelected', names: ['workspace_read'] });
+  panel.click('compareTab');
+  assert.deepEqual(Array.from(panel.state().toolSelection), ['mcp_search']);
+  const restored = webview(panel.state());
+  assert.match(restored.field('toolSelectionSummary').textContent, /mcp_search/);
+  assert.deepEqual(instance.errors, []);
+  assert.equal(instance.evaluations(), 0);
+  assert.doesNotMatch(JSON.stringify(restored.state()), /approvedReadOnlyTools|Approve for this test/);
+});
+
+test('changing selected tools clears collected snapshots but preserves manually supplied evidence', () => {
+  const source = { ...experiment(), comparisonKind: 'prompt', comparisonMode: 'model-prompt-only',
+    toolSelection: ['old_tool'], evidenceCollection: { model: 'collector' },
+    baseline: { model: 'shared', prompt: 'Original', response: 'Previous output' },
+    candidate: { model: 'shared', prompt: 'Edited', response: 'Previous output' } };
+  const panel = webview(source);
+  panel.receive({ type: 'toolsSelected', names: ['new_tool'] });
+  assert.equal(panel.state().evidence, '');
+  assert.equal(panel.state().evidenceCollection, undefined);
+  assert.equal(panel.state().baseline.response, undefined);
+  const manual = webview({ ...source, evidenceCollection: null });
+  manual.receive({ type: 'toolsSelected', names: [] });
+  assert.equal(manual.state().evidence, source.evidence);
+});
+
+test('missing saved selections fail without substitution or model generation', async () => {
+  let calls = 0;
+  const instance = host({}, { runModel: async () => { calls++; } });
+  instance.vscode.lm = { tools: [{ name: 'available' }], invokeTool: async () => { throw new Error('Must not invoke'); } };
+  await instance.send({ type: 'orchestrate', experiment: { ...experiment(), comparisonMode: 'end-to-end',
+    toolSelection: ['missing'], baseline: { provider: 'ollama', model: 'one' }, candidate: { provider: 'ollama', model: 'two' } } });
+  assert.match(instance.errors[0], /no longer available.*no tools were substituted/);
+  assert.equal(calls, 0);
+});
+
+test('live runs and evidence collection exclude unverified tools and recheck saved declarations every test', async () => {
+  for (const collect of [false, true]) {
+    const requests = [];
+    let certifications = 0;
+    const instance = host({ resolveRunModels: async () => ({ baseline: {}, candidate: {} }),
+      runWithVsCode: async (api, request, model, token, options) => {
+        requests.push(options?.tools?.map(tool => tool.name));
+        assert.doesNotMatch(request.prompt, /STALE_SNAPSHOT/);
+        if (!options?.tools) return { ...request, response: 'Frozen evidence answer', elapsedMs: 1 };
+        return options.conversation.some(message => message.role === 'tool')
+          ? { ...request, response: 'Observed facts', elapsedMs: 1 }
+          : { ...request, toolCalls: [{ callId: 'read', name: 'read_data', input: {} }] };
+      } });
+    class LanguageModelTextPart { constructor(value) { this.value = value; } }
+    instance.vscode.LanguageModelTextPart = LanguageModelTextPart;
+    const invocations = [];
+    instance.vscode.lm = { tools: ['read_data', 'write_data'].map(name => ({ name, description: name, inputSchema: { type: 'object' } })),
+      invokeTool: async name => { invocations.push(name); return { content: [new LanguageModelTextPart('Observed facts')] }; } };
+    instance.vscode.window.showQuickPick = async (items, options) => {
+      assert.match(options.title, /verified are read-only/);
+      assert.ok(items.every(item => item.picked === false));
+      certifications++;
+      return [items.find(item => item.label === 'read_data')];
+    };
+    instance.vscode.window.showWarningMessage = async () => 'Allow request';
+    const source = { prompt: 'Task', incomingMessage: 'Input', evidence: collect ? '' : 'STALE_SNAPSHOT',
+      ...(!collect ? { evidenceCollection: { model: 'collector', collectedAt: new Date().toISOString(),
+        elapsedMs: 1, modelRequestCount: 1, toolCallCount: 1, usageTurns: [] } } : {}),
+      comparisonKind: collect ? 'prompt' : 'model', comparisonMode: collect ? 'model-prompt-only' : 'end-to-end',
+      toolSelection: ['read_data', 'write_data'], test: { repetitions: 1 },
+      baseline: { provider: 'vscode', model: 'shared', ...(collect ? { prompt: 'Original' } : {}) },
+      candidate: { provider: 'vscode', model: 'shared', ...(collect ? { prompt: 'Edited' } : {}) } };
+    await instance.send({ type: 'orchestrate', experiment: source });
+    assert.deepEqual(instance.errors, []);
+    assert.ok(requests.filter(Boolean).every(names => names.join(',') === 'read_data'));
+    assert.ok(invocations.every(name => name === 'read_data'));
+    const completed = instance.messages.findLast(message => message.type === 'testFinished').experiment;
+    assert.deepEqual(completed.toolSelection, ['read_data']);
+    assert.equal(collect ? completed.evidenceCollection.toolPolicy : completed.testRun.plan.toolPolicy,
+      'verified-read-only-confirm-every-request');
+    assert.deepEqual(require('../src/orchestration').validateTestRecord(completed.testRun), completed.testRun);
+    const callsBefore = requests.length;
+    instance.vscode.window.showQuickPick = async () => { certifications++; return []; };
+    await instance.send({ type: 'orchestrate', experiment: {
+      ...completed, ...(collect ? { evidence: '', evidenceCollection: undefined } : {}),
+      readOnlyTools: ['read_data'], toolPolicy: 'verified-read-only-confirm-every-request'
+    } });
+    assert.equal(certifications, 2);
+    assert.equal(requests.length, callsBefore);
+    assert.match(instance.errors.at(-1), /No tools were verified read-only/);
+  }
+});
+
+test('cancelling read-only verification stops before generation and leaves the saved selection intact', async () => {
+  let runs = 0;
+  const instance = host({}, { runModel: async () => { runs++; } });
+  instance.vscode.lm = { tools: [{ name: 'read_data' }], invokeTool: async () => { throw new Error('Must not run'); } };
+  instance.vscode.window.showQuickPick = async () => undefined;
+  const source = { ...experiment(), comparisonMode: 'end-to-end', toolSelection: ['read_data'],
+    baseline: { provider: 'ollama', model: 'one' }, candidate: { provider: 'ollama', model: 'two' } };
+  await instance.send({ type: 'orchestrate', experiment: source });
+  assert.deepEqual(instance.errors, []);
+  assert.equal(runs, 0);
+  assert.equal(instance.messages.some(message => message.type === 'toolsSelected'), false);
+  assert.deepEqual(source.toolSelection, ['read_data']);
+  assert.match(instance.messages.findLast(message => message.type === 'reviewStatus').message, /Read-only verification cancelled/);
+});
+
+test('imports reject malformed tool selections before they reach the webview', () => {
+  const { compare } = require('../src/core');
+  for (const names of ['tool_name', null, [{}], ['duplicate', 'duplicate']]) {
+    assert.throws(() => compare({ ...experiment(), toolSelection: names }), /Invalid selected tool names/);
+  }
+});
 
 test('manual history saving preserves and restores a review without calling models again', async () => {
   const instance = host();
@@ -542,7 +665,7 @@ test('prompt review exposes preparation and live evidence progress beside the ac
   panel.advanceTime(65000);
   assert.equal(panel.field('reviewElapsed').textContent, '1:05 elapsed');
   panel.receive({ type: 'reviewStatus', phase: 'evidence', message: 'Shared evidence: model request 8 | Tool calls: 43' });
-  assert.equal(panel.field('reviewProgressTitle').textContent, 'Collecting shared Datadog evidence');
+  assert.equal(panel.field('reviewProgressTitle').textContent, 'Collecting shared tool evidence');
   assert.match(panel.field('reviewProgressDetail').textContent, /Tool calls: 43/);
   assert.equal(panel.field('reviewSteps').children[0]['data-state'], 'complete');
   assert.equal(panel.field('reviewSteps').children[1]['aria-current'], 'step');
@@ -653,7 +776,7 @@ test('shared-evidence prompt tests collect once and replay exact raw results wit
     tools: [{ name: 'search_datadog_logs', inputSchema: { type: 'object' } }],
     invokeTool: async () => { toolCalls++; return { content: [new LanguageModelTextPart('RAW_SNAPSHOT_401')] }; }
   };
-  instance.vscode.window.showWarningMessage = async () => { approvals++; return 'Approve for this test'; };
+  instance.vscode.window.showWarningMessage = async () => { approvals++; return 'Allow request'; };
   const source = { prompt: '', incomingMessage: 'Investigate service:example', comparisonKind: 'prompt', comparisonMode: 'model-prompt-only',
     evidence: '', baseline: { provider: 'vscode', model: 'shared', prompt: 'Original instructions' },
     candidate: { provider: 'vscode', model: 'shared', prompt: 'Edited instructions' }, test: { repetitions: 2 } };
@@ -711,7 +834,7 @@ test('shared evidence collection errors and cancellation do not start either pro
         return new Promise((resolve, reject) => token.onCancellationRequested(() => reject(new api.CancellationError())));
       } });
     instance.vscode.lm = { tools: [{ name: 'search_datadog_logs' }], invokeTool: async () => { throw new Error('Must not execute'); } };
-    instance.vscode.window.showWarningMessage = async () => 'Approve for this test';
+    instance.vscode.window.showWarningMessage = async () => 'Allow request';
     const running = instance.send({ type: 'orchestrate', experiment: source });
     await ready;
     if (cancel) await instance.send({ type: 'cancelReview' });
@@ -1167,7 +1290,7 @@ test('ordinary CodeMind-shaped runs separate the agent instructions and normaliz
   await instance.send({ type: 'run', side: 'a', experiment: { ...experiment(), prompt: 'Instructions {{alert}}',
     incomingMessage: '{"eventId":"event-123","monitorId":"123","body":"Failed requests"}', baseline: { provider: 'ollama', model: 'model' } } });
   assert.equal(sent.systemPrompt, 'Instructions {{alert}}');
-  assert.match(sent.prompt, /^Analyze this Datadog alert event:/);
+  assert.match(sent.prompt, /^Analyze this alert event:/);
   assert.match(sent.prompt, /"eventId":"event-123"/);
   assert.equal(instance.errors.length, 0);
 });
@@ -1203,11 +1326,11 @@ test('orchestration uses selected VS Code models without calling HTTP endpoints'
   assert.equal(record.pairs[0].baseline.result.estimatedInputTokens, 50);
 });
 
-test('end-to-end orchestration lets both VS Code models independently use Datadog without pasted evidence', async () => {
+test('end-to-end orchestration gives both models the same selected multi-provider tools without pasted evidence', async () => {
   const inputs = [];
   const instance = host({ evaluateWithCopilot: async (api, input) => {
     inputs.push(input);
-    return { inputFingerprint: evaluationKey(input), verdict: 'tie', summary: 'Both used Datadog.', criteria: [],
+    return { inputFingerprint: evaluationKey(input), verdict: 'tie', summary: 'Both used selected tools.', criteria: [],
       unknowns: [], judgments: [], inputTokenEstimates: [], model: { id: 'reviewer' } };
   } });
   class LanguageModelTextPart { constructor(value) { this.value = value; } }
@@ -1225,20 +1348,22 @@ test('end-to-end orchestration lets both VS Code models independently use Datado
       return { stream: (async function* () {
         yield new LanguageModelThinkingPart('Internal reasoning, not evidence.');
         if (hasResults) yield new LanguageModelTextPart(id + ' final answer');
-        else yield new LanguageModelToolCallPart(id + '-call', 'mcp_datadog_mcp_2_search_datadog_logs', { query: id });
+        else yield new LanguageModelToolCallPart(id + '-call', 'mcp_github_search_issues', { query: id });
       })() };
     }
   }));
   const toolCalls = [];
   instance.vscode.lm = { selectChatModels: async () => models,
-    tools: [{ name: 'mcp_datadog_mcp_2_search_datadog_logs', description: 'Search', inputSchema: { type: 'object' } }, { name: 'github-search' }],
+    tools: [{ name: 'mcp_github_search_issues', description: 'Search issues', inputSchema: { type: 'object' } },
+      { name: 'workspace_read_file', description: 'Read file', inputSchema: { type: 'object' } },
+      { name: 'unselected_write_tool', description: 'Write', inputSchema: { type: 'object' } }],
     invokeTool: async (name, { input }) => {
       toolCalls.push(input.query);
       return { content: [new LanguageModelTextPart(input.query + ' observed 401')] };
     } };
-  instance.vscode.window.showQuickPick = async () => { throw new Error('Do not prompt for a tool list'); };
+  instance.vscode.window.showQuickPick = async items => items.slice(0, 2);
   let approvals = 0;
-  instance.vscode.window.showWarningMessage = async () => { approvals++; return 'Approve for this test'; };
+  instance.vscode.window.showWarningMessage = async () => { approvals++; return 'Allow request'; };
   await instance.send({ type: 'orchestrate', experiment: { ...experiment(), evidence: '', comparisonMode: 'end-to-end', test: { repetitions: 1 },
     baseline: { provider: 'vscode', model: 'baseline-model' }, candidate: { provider: 'vscode', model: 'candidate-model' } } });
   assert.deepEqual(instance.errors, []);
@@ -1246,18 +1371,21 @@ test('end-to-end orchestration lets both VS Code models independently use Datado
   assert.equal(requests.length, 4);
   assert.equal(requests[0].messages.length, requests[2].messages.length);
   assert.equal(requests[2].messages.some(message => JSON.stringify(message).includes('baseline-model observed')), false);
-  assert.deepEqual(requests[0].options.tools.map(tool => tool.name), ['mcp_datadog_mcp_2_search_datadog_logs']);
-  assert.equal(approvals, 1);
+  assert.deepEqual(requests[0].options.tools.map(tool => tool.name), ['mcp_github_search_issues', 'workspace_read_file']);
+  assert.deepEqual(requests[0].options.tools, requests[2].options.tools);
+  assert.equal(approvals, 2);
   assert.match(inputs[0].evidence, /baseline-model observed 401/);
   assert.match(inputs[0].evidence, /candidate-model observed 401/);
   const completed = instance.messages.findLast(message => message.type === 'testFinished').experiment;
   assert.equal(completed.testRun.status, 'completed');
   assert.equal(completed.evidence, '');
   assert.equal(completed.comparisonMode, 'end-to-end');
+  assert.deepEqual(completed.toolSelection, ['mcp_github_search_issues', 'workspace_read_file']);
+  assert.deepEqual(completed.testRun.plan.toolCatalog.map(tool => tool.name), completed.toolSelection);
   await instance.send({ type: 'compare', experiment: completed });
   const result = instance.messages.findLast(message => message.type === 'result').result;
   assert.ok(result.testRun);
-  assert.equal(result.evaluation.summary, 'Both used Datadog.');
+  assert.equal(result.evaluation.summary, 'Both used selected tools.');
   assert.equal(result.testSummary.preference, 'inconclusive');
   assert.match(result.evidence, /candidate-model observed 401/);
   await instance.send({ type: 'export', experiment: completed });
@@ -1272,7 +1400,7 @@ test('end-to-end orchestration reports missing Datadog tools before generation',
   const instance = host({}, { runModel: async () => { calls++; } });
   await instance.send({ type: 'orchestrate', experiment: { ...experiment(), evidence: '', comparisonMode: 'end-to-end',
     baseline: { provider: 'ollama', model: 'baseline' }, candidate: { provider: 'ollama', model: 'candidate' } } });
-  assert.match(instance.errors[0], /No Datadog MCP tools/);
+  assert.match(instance.errors[0], /No VS Code tools/);
   assert.equal(calls, 0);
   assert.equal(instance.messages.findLast(message => message.type === 'busy').value, false);
 });
@@ -1291,6 +1419,7 @@ test('unsupported model capabilities and declined test consent stop before any g
   instance.vscode.lm.tools = [{ name: 'datadog-search_datadog_logs', inputSchema: { type: 'object' } }];
   instance.vscode.lm.invokeTool = async () => { throw new Error('Must not call Datadog'); };
   instance.vscode.window.showWarningMessage = async () => undefined;
+  instance.vscode.window.showQuickPick = async () => undefined;
   await instance.send({ type: 'orchestrate', experiment: input });
   assert.equal(instance.messages.some(message => message.type === 'testFinished'), false);
   assert.equal(calls, 0);
@@ -1314,9 +1443,7 @@ test('endpoint-backed investigations use Datadog and denied requests stop the te
     instance.vscode.LanguageModelTextPart = LanguageModelTextPart;
     instance.vscode.lm = { tools: [{ name: 'datadog-search_datadog_logs', description: 'Search', inputSchema: { type: 'object' } }],
       invokeTool: async () => { invocations++; return { content: [new LanguageModelTextPart('401 increased')] }; } };
-    instance.vscode.window.showQuickPick = async () => { throw new Error('Do not prompt for a tool list'); };
-    instance.vscode.window.showWarningMessage = async message => message.includes('for this test')
-      ? 'Review every request' : approve ? 'Allow request' : undefined;
+    instance.vscode.window.showWarningMessage = async () => approve ? 'Allow request' : undefined;
     await instance.send({ type: 'orchestrate', experiment: { ...experiment(), evidence: '', comparisonMode: 'end-to-end', test: { repetitions: 1 },
       baseline: { provider: 'ollama', model: 'baseline' }, candidate: { provider: 'openai', model: 'candidate', endpoint: 'https://models.example.test/v1' } } });
     assert.deepEqual(instance.errors, []);
@@ -1335,7 +1462,7 @@ test('full investigations retain complete evidence and token estimates through U
       criteria: [{ criterion: 'grounding', verdict: 'candidate', citations: [] }], unknowns: [], judgments: [],
       inputTokenEstimates: [], model: { id: 'reviewer' } };
   } }, { runModel: async (input, { conversation }) => {
-    assert.ok(conversation.some(message => message.content === DATADOG_AGENT_PROMPT));
+    assert.ok(conversation.some(message => message.content === AGENT_PROMPT));
     return conversation.some(message => message.role === 'tool')
       ? { ...input, response: '401 increased, root cause remains unknown.', inputTokens: null, outputTokens: null,
         estimatedInputTokens: 20, estimatedOutputTokens: 10 }
@@ -1346,7 +1473,7 @@ test('full investigations retain complete evidence and token estimates through U
   instance.vscode.LanguageModelTextPart = LanguageModelTextPart;
   instance.vscode.lm = { tools: [{ name: 'mcp_datadog_search_datadog_logs', inputSchema: { type: 'object' } }],
     invokeTool: async () => ({ content: [new LanguageModelTextPart('401 increased.\n' + 'x'.repeat(60000) + 'OMITTED_TAIL')] }) };
-  instance.vscode.window.showWarningMessage = async () => 'Approve for this test';
+  instance.vscode.window.showWarningMessage = async () => 'Allow request';
   const input = { ...experiment(), evidence: '', comparisonMode: 'end-to-end', test: { repetitions: 1 },
     baseline: { provider: 'ollama', model: 'baseline' }, candidate: { provider: 'ollama', model: 'candidate' } };
   await instance.send({ type: 'orchestrate', experiment: input });
@@ -1398,7 +1525,7 @@ test('full investigations retain complete evidence and token estimates through U
   await instance.send({ type: 'report', experiment: exported });
   assert.doesNotMatch(instance.files[1], /Budget-limited investigation/);
   assert.match(instance.files[1], /estimatedOutputTokens/);
-  assert.match(instance.markup, /Investigation instructions/);
+  assert.match(instance.markup, /Tool instructions/);
   assert.doesNotMatch(instance.markup, /Shared budget instructions|50,000/);
   instance.vscode.window.showOpenDialog = async () => ['saved-test.json'];
   instance.vscode.workspace.fs.readFile = async () => Buffer.from(JSON.stringify(exported));
@@ -1421,6 +1548,27 @@ test('full investigations retain complete evidence and token estimates through U
     assert.equal(instance.errors.length, errors + 1);
     assert.match(instance.errors.at(-1), /Invalid controlled-test record/);
   }
+});
+
+test('cancelled live tests retain earlier tool activity in history without a successful response', async () => {
+  const instance = host({}, { runModel: async input => ({ ...input, inputTokens: 10, outputTokens: 2,
+    toolCalls: [{ callId: 'call', name: 'workspace_operation', input: {} }] }) });
+  class LanguageModelTextPart { constructor(value) { this.value = value; } }
+  instance.vscode.LanguageModelTextPart = LanguageModelTextPart;
+  instance.vscode.lm = { tools: [{ name: 'workspace_operation', description: 'Operation', inputSchema: { type: 'object' } }],
+    invokeTool: async () => ({ content: [new LanguageModelTextPart('Retained earlier activity')] }) };
+  let approvals = 0;
+  instance.vscode.window.showWarningMessage = async () => ++approvals === 1 ? 'Allow request' : undefined;
+  await instance.send({ type: 'orchestrate', experiment: { ...experiment(), comparisonMode: 'end-to-end',
+    toolSelection: ['workspace_operation'], test: { repetitions: 1 },
+    baseline: { provider: 'ollama', model: 'one' }, candidate: { provider: 'ollama', model: 'two' } } });
+  assert.deepEqual(instance.errors, []);
+  const saved = instance.historyEntries[0].experiment.testRun;
+  assert.equal(saved.status, 'cancelled');
+  assert.equal(saved.pairs[0].baseline.status, 'cancelled');
+  assert.equal(saved.pairs[0].baseline.result.response, '');
+  assert.equal(saved.pairs[0].baseline.result.toolEvidence[0].content, 'Retained earlier activity');
+  assert.deepEqual(require('../src/orchestration').validateTestRecord(saved), saved);
 });
 
 test('analysis and exports show exact screenshot ratios, averages, activity and per-turn Azure scenarios', async () => {

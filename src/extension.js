@@ -11,7 +11,7 @@ const { createHistory } = require('./history');
 const { asHtml } = require('./html');
 const { usageReport } = require('./usage');
 const { selectEvaluator, selectRunModel, resolveRunModels, runWithVsCode, evaluateWithCopilot, openReviewChat, evaluationKey } = require('./copilot');
-const { selectDatadogTools, runDatadogAgent, DATADOG_AGENT_PROMPT } = require('./datadog');
+const { selectTools, resolveTools, verifyReadOnlyTools, runToolAgent, AGENT_PROMPT } = require('./tool-agent');
 const { promptDecision, validatePromptChanges } = require('./prompt-review');
 const { optimizerRequest, parseOptimizerDraft } = require('./prompt-optimizer');
 const { collectionRequest, freezeEvidence } = require('./prompt-evidence');
@@ -83,15 +83,21 @@ function panelHtml(panel, context) {
   <section class="prompt"><div id="promptModelSlot" hidden></div><div id="sharedInstructions"><div class="instruction-heading"><label for="prompt">Agent instructions / shared prompt</label>
   <button id="loadInstructions" type="button">Load agent file</button></div>
   <textarea id="prompt" rows="2" placeholder="Enter the prompt shared by both models"></textarea></div>
-  <details id="datadogBudgetGuidance"><summary>Investigation instructions (automatically added to End-to-end runs)</summary>
-  <pre class="response-content">${DATADOG_AGENT_PROMPT.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</pre></details>
+  <div class="instruction-heading"><span id="toolSelectionSummary" role="status">No tools selected</span>
+  <button id="selectTools" type="button">Select tools</button></div>
+  <p class="notice">Configure servers in VS Code using MCP: List Servers. Select exposed MCP or extension tools here; Chat selections are not inherited.
+  Before each test, mark only tools you have verified are read-only; all others are excluded. Both sides use the same verified tools.
+  Every call still needs confirmation. Writes, commands, code execution, and shared-state changes are not permitted. Text results only.
+  Individual Run buttons do not use tools; use Orchestrate Test for live runs.</p>
+  <details id="agentGuidance"><summary>Tool instructions (automatically added to End-to-end runs)</summary>
+  <pre class="response-content">${AGENT_PROMPT.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</pre></details>
   <label id="incomingMessageLabel" for="incomingMessage" class="evidence-label">Incoming message / trigger</label>
   <textarea id="incomingMessage" rows="3" placeholder="CodeMind mapped alert, normalized event JSON, or plain message"></textarea>
   <details id="evidenceOptions"><summary id="evidenceOptionsLabel">Source evidence (optional for live investigations)</summary>
   <label for="evidence" class="evidence-label">Source evidence / tool results</label>
   <textarea id="evidence" rows="3" placeholder="Optional for End-to-end agent; required for Model / prompt only"></textarea>
   </details>
-  <p id="investigationDescription" class="notice">End-to-end Orchestrate Test lets each model investigate independently with approved Datadog MCP tools. No pasted evidence is required.</p></section>
+  <p id="investigationDescription" class="notice">End-to-end Orchestrate Test lets each model independently use your selected VS Code tools. No pasted evidence is required.</p></section>
   <div class="columns">${panelMarkup('a', 'Baseline')}${panelMarkup('b', 'Candidate')}</div>
   <section id="promptTools" hidden>
   <details id="promptOptimizer" class="result-details"><summary>Help me improve this prompt</summary>
@@ -100,7 +106,7 @@ function panelHtml(panel, context) {
   <label>Keep unchanged <textarea id="optimizerPreserve" rows="2" placeholder="Required fields, behavior, constraints, or wording"></textarea></label>
   <label>What would a better output do? <textarea id="optimizerSuccess" rows="2" placeholder="Optional success criteria"></textarea></label>
   <button id="generatePrompt" type="button">Generate edited draft</button>
-  <p class="notice">Choose a rewriting model when prompted. This only drafts instructions; it does not run Datadog or test either prompt.</p>
+  <p class="notice">Choose a rewriting model when prompted. This only drafts instructions; it does not invoke tools or test either prompt.</p>
   <p id="optimizerStatus" class="runstatus" role="status"></p>
   <div id="optimizerPreview" hidden><p id="optimizerSummary"></p>
   <label>Review and edit draft <textarea id="optimizerDraft" rows="8"></textarea></label>
@@ -110,7 +116,7 @@ function panelHtml(panel, context) {
   <div id="promptDiff" aria-label="Prompt changes"></div>
   <button id="promptTest" type="button" class="primary">Review prompt change</button>
   <div id="promptProgressSlot"></div>
-  <p class="notice">One action runs both prompts and reviews their outputs automatically. If evidence is blank, collect one shared Datadog snapshot first. You do not need to run or evaluate either prompt separately.</p>
+  <p class="notice">One action runs both prompts and reviews their outputs automatically. If evidence is blank, collect one shared snapshot using selected tools first. You do not need to run or evaluate either prompt separately.</p>
   </section>
   <details id="promptAdvanced"><summary>Test settings and saved outputs (optional)</summary>
   <button id="promptReviewOutputs" type="button">Review pasted outputs only</button>
@@ -326,8 +332,27 @@ function activate(context) {
           if (!disposed) await panel.webview.postMessage({ type: 'reviewStatus', message: 'Review cancelled before either prompt was run.' });
           return;
         }
-        const toolSelection = collect || plan.comparisonMode === 'end-to-end' ? await selectDatadogTools(vscode) : undefined;
-        const tools = toolSelection?.tools;
+        let tools;
+        if (collect || plan.comparisonMode === 'end-to-end') {
+          let names = input.toolSelection;
+          if (!names?.length) names = await selectTools(vscode, names);
+          if (names === undefined) {
+            if (!disposed) await panel.webview.postMessage({ type: 'reviewStatus', message: 'Tool selection cancelled. No generation was started.' });
+            return;
+          }
+          tools = await verifyReadOnlyTools(vscode, resolveTools(vscode, names));
+          if (!tools || disposed || reviewCancellation.token.isCancellationRequested) {
+            if (!disposed) await panel.webview.postMessage({ type: 'reviewStatus', message: 'Read-only verification cancelled. No generation was started.' });
+            return;
+          }
+          names = tools.map(tool => tool.name);
+          if (input.evidenceCollection && JSON.stringify(input.toolSelection) !== JSON.stringify(names)) {
+            input = { ...input, evidence: '', evidenceCollection: undefined };
+          }
+          input = { ...input, toolSelection: names, ...(plan.comparisonMode === 'end-to-end' ? { toolCatalog: tools } : {}) };
+          plan = createTestPlan(input, { allowPendingEvidence: collect });
+          if (!disposed) await panel.webview.postMessage({ type: 'toolsSelected', names });
+        }
         if ((collect || plan.comparisonMode === 'end-to-end') && (!tools || disposed || reviewCancellation.token.isCancellationRequested)) {
           if (!disposed) await panel.webview.postMessage({ type: 'reviewStatus', message: 'Review cancelled before either prompt was run.' });
           return;
@@ -338,14 +363,14 @@ function activate(context) {
           if (token.isCancellationRequested) reviewCancellation.cancel();
           try {
             if (collect) {
-              await panel.webview.postMessage({ type: 'reviewStatus', phase: 'evidence', message: 'Collecting one shared Datadog snapshot. Neither prompt is being tested yet.' });
-              const collected = await runDatadogAgent(vscode, collectionInput, tools, (conversation, tools, token) => {
+              await panel.webview.postMessage({ type: 'reviewStatus', phase: 'evidence', message: 'Collecting one shared tool snapshot. Neither prompt is being tested yet.' });
+              const collected = await runToolAgent(vscode, { ...collectionInput, runLabel: 'Shared evidence collection' }, tools, (conversation, tools, token) => {
                 if (collectionInput.provider === 'vscode') return runWithVsCode(vscode, collectionInput, generationModels.baseline, token, { conversation, tools });
                 return runModel(collectionInput, { apiKey: keys.baseline, signal: controller.signal, conversation, tools });
               }, reviewCancellation.token, message => {
                 progress.report({ message: 'Shared evidence: ' + message });
                 panel.webview.postMessage({ type: 'reviewStatus', phase: 'evidence', message: 'Shared evidence: ' + message });
-              }, toolSelection.approvedReadOnlyTools);
+              });
               input = { ...input, ...freezeEvidence(collected), comparisonMode: 'model-prompt-only' };
               await panel.webview.postMessage({ type: 'sharedEvidence', evidence: input.evidence, evidenceCollection: input.evidenceCollection });
               plan = createTestPlan(input);
@@ -357,7 +382,10 @@ function activate(context) {
                   ? runWithVsCode(vscode, variant, generationModels[side], reviewCancellation.token,
                     { tokenAwareInput: plan.comparisonKind === 'prompt' })
                   : runModel(variant, { apiKey: keys[side], signal });
-                return runDatadogAgent(vscode, variant, tools, (conversation, tools, token) => {
+                const runLabel = plan.comparisonKind === 'prompt'
+                  ? side === 'baseline' ? 'Original prompt' : 'Edited prompt'
+                  : side === 'baseline' ? 'Baseline' : 'Candidate';
+                return runToolAgent(vscode, { ...variant, runLabel }, tools, (conversation, tools, token) => {
                   if (variant.provider === 'vscode') return runWithVsCode(vscode, variant, generationModels[side], token, { conversation, tools });
                   const child = new AbortController();
                   const listener = token.onCancellationRequested(() => child.abort());
@@ -366,7 +394,7 @@ function activate(context) {
                 }, reviewCancellation.token, message => {
                   progress.report({ message: side + ': ' + message });
                   panel.webview.postMessage({ type: 'reviewStatus', message: side + ': ' + message });
-                }, toolSelection.approvedReadOnlyTools).catch(error => {
+                }).catch(error => {
                   if (error instanceof vscode.CancellationError) reviewCancellation.cancel();
                   throw error;
                 });
@@ -405,7 +433,8 @@ function activate(context) {
             response: pair?.[side]?.result?.response || '' });
           const completed = { prompt: instructions, incomingMessage: plan.incomingMessage || '', evidence: plan.evidence,
             comparisonMode: plan.comparisonMode || 'model-prompt-only', baseline: variant('baseline'), candidate: variant('candidate'),
-            review: plan.review, checks: plan.checks, test: { repetitions: plan.repetitions }, testRun: record };
+            review: plan.review, checks: plan.checks, test: { repetitions: plan.repetitions }, testRun: record,
+            ...(input.toolSelection ? { toolSelection: input.toolSelection } : {}) };
           if (plan.evidenceCollection) completed.evidenceCollection = plan.evidenceCollection;
           if (input.optimizer) completed.optimizer = input.optimizer;
           if (plan.comparisonKind) completed.comparisonKind = plan.comparisonKind;
@@ -443,7 +472,7 @@ function activate(context) {
       if (typeof msg.type === 'string' && msg.type.startsWith('history')) { await handleHistory(msg); return; }
       try {
         if (msg.type === 'cancelReview') { reviewCancellation?.cancel(); return; }
-        if (running && ['generatePrompt', 'selectModel', 'loadInstructions', 'orchestrate', 'evaluate', 'chat', 'run', 'runBoth', 'import', 'setKey'].includes(msg.type)) return;
+        if (running && ['generatePrompt', 'selectModel', 'selectTools', 'loadInstructions', 'orchestrate', 'evaluate', 'chat', 'run', 'runBoth', 'import', 'setKey'].includes(msg.type)) return;
         if (msg.type === 'compare') {
           await panel.webview.postMessage({ type: 'result', result: comparison(msg.experiment), revision: msg.revision });
         } else if (msg.type === 'generatePrompt') {
@@ -474,6 +503,16 @@ function activate(context) {
           }
         } else if (msg.type === 'orchestrate') {
           await runTest(msg.experiment);
+        } else if (msg.type === 'selectTools') {
+          running = true;
+          await panel.webview.postMessage({ type: 'busy', value: true, kind: 'selection' });
+          try {
+            const names = await selectTools(vscode, msg.experiment.toolSelection);
+            if (names !== undefined && !disposed) await panel.webview.postMessage({ type: 'toolsSelected', names });
+          } finally {
+            running = false;
+            if (!disposed) await panel.webview.postMessage({ type: 'busy', value: false });
+          }
         } else if (msg.type === 'selectModel') {
           if (!['a', 'b'].includes(msg.side)) return;
           running = true;
