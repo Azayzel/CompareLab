@@ -12,19 +12,22 @@ const { asHtml } = require('./html');
 const { usageReport } = require('./usage');
 const { selectEvaluator, selectRunModel, resolveRunModels, runWithVsCode, evaluateWithCopilot, openReviewChat, evaluationKey } = require('./copilot');
 const { selectDatadogTools, runDatadogAgent, DATADOG_AGENT_PROMPT } = require('./datadog');
+const { promptDecision, validatePromptChanges } = require('./prompt-review');
+const { optimizerRequest, parseOptimizerDraft } = require('./prompt-optimizer');
+const { collectionRequest, freezeEvidence } = require('./prompt-evidence');
 
 const secretId = endpoint => 'comparelab:key:' + crypto.createHash('sha256').update(endpoint).digest('hex');
 
 function panelMarkup(side, heading) {
-  return `<section><h2 id="${side}-heading">${heading}</h2>
-    <div id="${side}-modelSettings"><label id="${side}-modelLabel" for="${side}-model">Model</label><div class="model-choice">
+  return `<section id="${side}-editor"><h2 id="${side}-heading">${heading}</h2>
+    <div id="${side}-modelSlot"><div id="${side}-modelSettings"><label id="${side}-modelLabel" for="${side}-model">Model</label><div class="model-choice">
     <input id="${side}-model" placeholder="Select a VS Code model" readonly>
-    <button id="${side}-selectModel" type="button">Select model</button></div></div>
+    <button id="${side}-selectModel" type="button">Select model</button></div></div></div>
     <details id="${side}-promptSection" class="prompt-override-details"><summary>Advanced: saved prompt override</summary>
     <div class="instruction-heading"><label id="${side}-promptLabel" for="${side}-prompt">Prompt override</label>
     <button id="${side}-loadInstructions" type="button">Load agent file</button></div>
     <textarea id="${side}-prompt" class="prompt-override" rows="6" placeholder="Uses shared prompt"></textarea></details>
-    <details class="raw-editor"><summary>Paste / edit raw response</summary>
+    <div id="${side}-technicalSlot"><details class="raw-editor"><summary>Paste / edit raw response</summary>
     <label>Response <textarea id="${side}-response" rows="6" placeholder="Paste response or run a model"></textarea></label></details>
     <details id="${side}-runner" class="runner"><summary>Run model (optional)</summary>
       <label>Provider <select id="${side}-provider">
@@ -56,7 +59,7 @@ function panelMarkup(side, heading) {
         <option value="">Unknown</option><option value="stop">stop</option><option value="length">length / truncated</option>
         <option value="tool_calls">tool_calls</option><option value="other">other</option></select></label>
       <label>Temperature <input id="${side}-temperature" type="number" step="0.1" min="0" max="2" placeholder="Provider default"></label>
-    </details></section>`;
+    </details></div></section>`;
 }
 
 function panelHtml(panel, context) {
@@ -68,7 +71,8 @@ function panelHtml(panel, context) {
   <link rel="stylesheet" href="${media('style.css')}"><link rel="stylesheet" href="${media('runners.css')}">
   <title>CompareLab</title></head><body><main>
   <header><div><h1>⇄ CompareLab</h1><p>Visual, context-aware model comparisons.</p></div>
-  <div id="currentActions" class="buttons"><button id="historySave">Save to history</button><button id="import">Import JSON</button><button id="export">Export JSON</button><button id="report">Markdown report</button><button id="htmlReport">Export HTML</button></div></header>
+  <details id="shareActions"><summary id="shareActionsLabel">Save / export</summary>
+  <div id="currentActions" class="buttons"><button id="historySave">Save to history</button><button id="import">Import JSON</button><button id="export">Export JSON</button><button id="report">Markdown report</button><button id="htmlReport">Export HTML</button></div></details></header>
   <nav class="view-tabs" role="tablist" aria-label="CompareLab views">
   <button id="compareTab" role="tab" aria-controls="compareView" aria-selected="true">Model comparison</button>
   <button id="promptTab" role="tab" aria-controls="compareView" aria-selected="false" tabindex="-1">Prompt comparison</button>
@@ -76,17 +80,41 @@ function panelHtml(panel, context) {
   <section id="compareView" role="tabpanel" aria-labelledby="compareTab">
   <p id="historySaveStatus" class="runstatus" role="status"></p>
   <p id="comparisonDescription" class="notice">Compare models using the same instructions and incoming message.</p>
-  <section class="prompt"><div id="sharedInstructions"><div class="instruction-heading"><label for="prompt">Agent instructions / shared prompt</label>
+  <section class="prompt"><div id="promptModelSlot" hidden></div><div id="sharedInstructions"><div class="instruction-heading"><label for="prompt">Agent instructions / shared prompt</label>
   <button id="loadInstructions" type="button">Load agent file</button></div>
   <textarea id="prompt" rows="2" placeholder="Enter the prompt shared by both models"></textarea></div>
   <details id="datadogBudgetGuidance"><summary>Investigation instructions (automatically added to End-to-end runs)</summary>
   <pre class="response-content">${DATADOG_AGENT_PROMPT.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</pre></details>
-  <label for="incomingMessage" class="evidence-label">Incoming message / trigger</label>
+  <label id="incomingMessageLabel" for="incomingMessage" class="evidence-label">Incoming message / trigger</label>
   <textarea id="incomingMessage" rows="3" placeholder="CodeMind mapped alert, normalized event JSON, or plain message"></textarea>
+  <details id="evidenceOptions"><summary id="evidenceOptionsLabel">Source evidence (optional for live investigations)</summary>
   <label for="evidence" class="evidence-label">Source evidence / tool results</label>
   <textarea id="evidence" rows="3" placeholder="Optional for End-to-end agent; required for Model / prompt only"></textarea>
+  </details>
   <p id="investigationDescription" class="notice">End-to-end Orchestrate Test lets each model investigate independently with approved Datadog MCP tools. No pasted evidence is required.</p></section>
   <div class="columns">${panelMarkup('a', 'Baseline')}${panelMarkup('b', 'Candidate')}</div>
+  <section id="promptTools" hidden>
+  <details id="promptOptimizer" class="result-details"><summary>Help me improve this prompt</summary>
+  <label>Improvement goal <select id="optimizerGoal"><option>Clearer instructions</option><option>More concise output</option>
+  <option>Better evidence grounding</option><option>More actionable recommendations</option><option>Consistent output structure</option></select></label>
+  <label>Keep unchanged <textarea id="optimizerPreserve" rows="2" placeholder="Required fields, behavior, constraints, or wording"></textarea></label>
+  <label>What would a better output do? <textarea id="optimizerSuccess" rows="2" placeholder="Optional success criteria"></textarea></label>
+  <button id="generatePrompt" type="button">Generate edited draft</button>
+  <p class="notice">Choose a rewriting model when prompted. This only drafts instructions; it does not run Datadog or test either prompt.</p>
+  <p id="optimizerStatus" class="runstatus" role="status"></p>
+  <div id="optimizerPreview" hidden><p id="optimizerSummary"></p>
+  <label>Review and edit draft <textarea id="optimizerDraft" rows="8"></textarea></label>
+  <button id="applyPromptDraft" type="button">Apply draft to edited prompt</button>
+  <p class="notice">Applying keeps the original unchanged and clears previous test results. Testing is a separate action. Rewriting usage is separate from investigation and evaluator totals.</p></div></details>
+  <h2>What changed in the prompt?</h2><p class="notice">Read changed passages side by side. Highlights mark edited words; unchanged sections are hidden. Edits alone do not establish quality.</p>
+  <div id="promptDiff" aria-label="Prompt changes"></div>
+  <button id="promptTest" type="button" class="primary">Review prompt change</button>
+  <div id="promptProgressSlot"></div>
+  <p class="notice">One action runs both prompts and reviews their outputs automatically. If evidence is blank, collect one shared Datadog snapshot first. You do not need to run or evaluate either prompt separately.</p>
+  </section>
+  <details id="promptAdvanced"><summary>Test settings and saved outputs (optional)</summary>
+  <button id="promptReviewOutputs" type="button">Review pasted outputs only</button>
+  <button id="promptFreshEvidence" type="button">Collect fresh evidence and test prompts</button>
   <div class="actionbar"><label>Required phrases (comma-separated) <input id="checks" placeholder="e.g. 401, 403"></label>
   <label>Comparison mode <select id="comparisonMode"><option value="end-to-end">End-to-end agent</option>
   <option value="model-prompt-only">Model / prompt only (frozen evidence required)</option></select></label>
@@ -98,8 +126,18 @@ function panelHtml(panel, context) {
   <div class="review-actions"><label class="checkbox"><input id="checkOrder" type="checkbox" checked>Check reversed order (2 reviews)</label>
   <button id="chat" type="button">Analyze in Copilot Chat</button>
   <button id="evaluate" type="button" class="primary">Evaluate with Copilot</button>
-  <button id="cancelReview" type="button" hidden>Cancel</button></div>
+  </div></details>
+  <div id="reviewProgressSlot"><section id="reviewProgress" class="review-progress" hidden aria-labelledby="reviewProgressTitle" aria-busy="false">
+  <div class="review-progress-heading"><span class="progress-spinner" aria-hidden="true"></span>
+  <h3 id="reviewProgressTitle" role="status">Preparing prompt review</h3><span id="reviewElapsed" aria-live="off"></span></div>
+  <ol id="reviewSteps" class="review-steps" aria-label="Review stages"></ol>
+  <p id="reviewProgressDetail" class="progress-detail" role="status"></p>
+  <p class="notice">This can take several minutes. Progress updates as model and tool requests finish; no completion time is estimated.</p>
+  <div id="progressCancelSlot"></div></section></div>
+  <div id="cancelReviewSlot"><button id="cancelReview" type="button" hidden>Cancel</button></div>
   <p id="reviewStatus" class="runstatus" role="status"></p>
+  <section id="promptResults" hidden aria-live="polite" tabindex="-1"></section>
+  <details id="promptAudit"><summary>Full outputs, reviews and technical details</summary>
   <section id="testResults" hidden aria-live="polite" tabindex="-1"></section>
   <section id="results" hidden tabindex="-1"><h2 class="section-title">Quality review</h2><div id="evaluation" aria-live="polite"></div>
   <div class="response-section-heading"><h2 id="responseHeading" class="section-title">Model reports</h2>
@@ -114,7 +152,7 @@ function panelHtml(panel, context) {
   <div id="diff" class="diff" aria-label="Inline difference"></div><div id="summary"></div><div id="checksResults"></div></details>
   <details class="result-details"><summary>Run comparability and efficiency</summary>
   <div id="efficiency"></div><div id="fairness"></div></details>
-  <details class="result-details"><summary>Execution traces and context provenance</summary><div id="traces"></div></details></section>
+  <details class="result-details"><summary>Execution traces and context provenance</summary><div id="traces"></div></details></section></details>
   </section>
   <section id="historyView" role="tabpanel" aria-labelledby="historyTab" hidden>
   <div class="history-heading"><div><h2>Comparison history</h2><p id="historyUsage" class="notice"></p></div>
@@ -160,17 +198,30 @@ function activate(context) {
         result.evaluation = pair?.evaluation ?? null;
       }
       if (result.evaluation) result.evaluation = { ...result.evaluation, usage: usageReport(result.evaluation.usageTurns || []) };
+      if (result.comparisonKind === 'prompt') {
+        if (result.evaluation?.promptChanges) validatePromptChanges(result.evaluation.promptChanges, {
+          baselinePrompt: result.promptComparison.original, candidatePrompt: result.promptComparison.edited,
+          baselineTask: result.baseline.prompt, candidateTask: result.candidate.prompt,
+          baseline: responseContent(result.baseline.response), candidate: responseContent(result.candidate.response)
+        }, result.promptComparison.spans);
+        result.promptDecision = promptDecision(result);
+      }
       return result;
     }
 
     async function saveHistory(input, revision) {
       const result = comparison(input);
       if (!result.testRun && !result.baseline.response.trim() && !result.candidate.response.trim()) {
-        throw new Error('Add at least one model response before saving a comparison to history.');
+        if (result.comparisonKind !== 'prompt') throw new Error('Add at least one model response before saving a comparison to history.');
+        if (!result.promptComparison.original.trim() && !result.promptComparison.edited.trim()) {
+          throw new Error('Enter an original or edited prompt before saving a prompt draft.');
+        }
       }
+      const draft = result.comparisonKind === 'prompt' && !result.testRun && !result.baseline.response.trim() && !result.candidate.response.trim();
       const saved = await history.save({ ...input, testRun: result.testRun }, result.evaluation);
       if (!disposed) await panel.webview.postMessage({ type: 'historySaved', entry: saved.entry, revision,
-        message: 'Saved to history.' + (saved.removed ? ' Removed ' + saved.removed + ' oldest entries to stay within the history limits.' : '') });
+        message: (draft ? 'Prompt draft saved to History. No review has been run.' : 'Saved to history.') +
+          (saved.removed ? ' Removed ' + saved.removed + ' oldest entries to stay within the history limits.' : '') });
     }
 
     async function handleHistory(msg) {
@@ -252,7 +303,12 @@ function activate(context) {
     }
 
     async function runTest(input) {
-      const plan = createTestPlan(input);
+      if (input.comparisonKind === 'prompt' && resolvePrompt(input.prompt, input.baseline?.prompt) === resolvePrompt(input.prompt, input.candidate?.prompt)) {
+        throw new Error('Edit the candidate prompt before testing. Identical prompts cannot establish a prompt improvement.');
+      }
+      const collect = input.comparisonKind === 'prompt' && input.comparisonMode !== 'end-to-end' && !String(input.evidence || '').trim();
+      let plan = createTestPlan(input, { allowPendingEvidence: collect });
+      const collectionInput = collect ? { ...plan.baseline, prompt: collectionRequest(input).prompt } : null;
       running = true;
       evaluation = null;
       reviewCancellation = new vscode.CancellationTokenSource();
@@ -260,24 +316,46 @@ function activate(context) {
       const cancellation = reviewCancellation.token.onCancellationRequested(() => controller.abort());
       await panel.webview.postMessage({ type: 'busy', value: true, kind: 'test' });
       try {
+        if (input.comparisonKind === 'prompt') await panel.webview.postMessage({ type: 'reviewStatus',
+          message: 'Preparing prompt review: choosing the shared model and reviewer. Both outputs will be reviewed automatically.' });
         const generationModels = await resolveRunModels(vscode, { baseline: plan.baseline, candidate: plan.candidate },
-          { requireTools: plan.comparisonMode === 'end-to-end' });
+          { requireTools: collect || plan.comparisonMode === 'end-to-end' });
         const keys = { baseline: await modelKey(plan.baseline), candidate: await modelKey(plan.candidate) };
         const model = await selectEvaluator(vscode);
-        if (!model || disposed || reviewCancellation.token.isCancellationRequested) return;
-        const toolSelection = plan.comparisonMode === 'end-to-end' ? await selectDatadogTools(vscode) : undefined;
+        if (!model || disposed || reviewCancellation.token.isCancellationRequested) {
+          if (!disposed) await panel.webview.postMessage({ type: 'reviewStatus', message: 'Review cancelled before either prompt was run.' });
+          return;
+        }
+        const toolSelection = collect || plan.comparisonMode === 'end-to-end' ? await selectDatadogTools(vscode) : undefined;
         const tools = toolSelection?.tools;
-        if (plan.comparisonMode === 'end-to-end' && (!tools || disposed || reviewCancellation.token.isCancellationRequested)) return;
+        if ((collect || plan.comparisonMode === 'end-to-end') && (!tools || disposed || reviewCancellation.token.isCancellationRequested)) {
+          if (!disposed) await panel.webview.postMessage({ type: 'reviewStatus', message: 'Review cancelled before either prompt was run.' });
+          return;
+        }
         const record = await vscode.window.withProgress({ title: 'CompareLab: Orchestrate Test',
           location: vscode.ProgressLocation.Notification, cancellable: true }, async (progress, token) => {
           const listener = token.onCancellationRequested(() => reviewCancellation.cancel());
           if (token.isCancellationRequested) reviewCancellation.cancel();
           try {
+            if (collect) {
+              await panel.webview.postMessage({ type: 'reviewStatus', phase: 'evidence', message: 'Collecting one shared Datadog snapshot. Neither prompt is being tested yet.' });
+              const collected = await runDatadogAgent(vscode, collectionInput, tools, (conversation, tools, token) => {
+                if (collectionInput.provider === 'vscode') return runWithVsCode(vscode, collectionInput, generationModels.baseline, token, { conversation, tools });
+                return runModel(collectionInput, { apiKey: keys.baseline, signal: controller.signal, conversation, tools });
+              }, reviewCancellation.token, message => {
+                progress.report({ message: 'Shared evidence: ' + message });
+                panel.webview.postMessage({ type: 'reviewStatus', phase: 'evidence', message: 'Shared evidence: ' + message });
+              }, toolSelection.approvedReadOnlyTools);
+              input = { ...input, ...freezeEvidence(collected), comparisonMode: 'model-prompt-only' };
+              await panel.webview.postMessage({ type: 'sharedEvidence', evidence: input.evidence, evidenceCollection: input.evidenceCollection });
+              plan = createTestPlan(input);
+            }
             return await orchestrateTest(input, {
               signal: controller.signal, comparePair: compare,
               runVariant: (variant, side, signal) => {
-                if (!tools) return variant.provider === 'vscode'
-                  ? runWithVsCode(vscode, variant, generationModels[side], reviewCancellation.token)
+                if (plan.comparisonMode !== 'end-to-end') return variant.provider === 'vscode'
+                  ? runWithVsCode(vscode, variant, generationModels[side], reviewCancellation.token,
+                    { tokenAwareInput: plan.comparisonKind === 'prompt' })
                   : runModel(variant, { apiKey: keys[side], signal });
                 return runDatadogAgent(vscode, variant, tools, (conversation, tools, token) => {
                   if (variant.provider === 'vscode') return runWithVsCode(vscode, variant, generationModels[side], token, { conversation, tools });
@@ -328,6 +406,8 @@ function activate(context) {
           const completed = { prompt: instructions, incomingMessage: plan.incomingMessage || '', evidence: plan.evidence,
             comparisonMode: plan.comparisonMode || 'model-prompt-only', baseline: variant('baseline'), candidate: variant('candidate'),
             review: plan.review, checks: plan.checks, test: { repetitions: plan.repetitions }, testRun: record };
+          if (plan.evidenceCollection) completed.evidenceCollection = plan.evidenceCollection;
+          if (input.optimizer) completed.optimizer = input.optimizer;
           if (plan.comparisonKind) completed.comparisonKind = plan.comparisonKind;
           if (!disposed) await panel.webview.postMessage({ type: 'testFinished', experiment: completed });
           try { await saveHistory(completed); }
@@ -337,9 +417,19 @@ function activate(context) {
             vscode.window.showErrorMessage('CompareLab: ' + message);
           }
           const limited = record.pairs.some(pair => ['baseline', 'candidate'].some(side => pair[side].result?.investigationBudget?.limited));
-          if (!disposed) await panel.webview.postMessage({ type: 'reviewStatus', message: 'Controlled test ' + record.status +
-            (limited ? ' with budget-limited investigations. Inspect the run warnings.' : '.') });
+          const reviewed = record.pairs.filter(pair => pair.evaluationStatus === 'succeeded').length;
+          if (!disposed) await panel.webview.postMessage({ type: 'reviewStatus', message: plan.comparisonKind === 'prompt'
+            ? reviewed === plan.repetitions ? 'Review complete. See the prompt recommendation below.'
+              : 'Review ' + (record.status === 'cancelled' ? 'cancelled' : 'incomplete') + ': ' + reviewed + ' of ' +
+                plan.repetitions + ' output pairs reviewed. See the errors below; no improvement has been established.'
+            : 'Controlled test ' + record.status + (limited ? ' with budget-limited investigations. Inspect the run warnings.' : '.') });
         }
+      } catch (error) {
+        if (collect && !input.evidence && (reviewCancellation.token.isCancellationRequested || error instanceof vscode.CancellationError)) {
+          if (!disposed) await panel.webview.postMessage({ type: 'reviewStatus', message: 'Shared evidence collection cancelled. Neither prompt was tested.' });
+          return;
+        }
+        throw error;
       } finally {
         cancellation.dispose();
         reviewCancellation.dispose();
@@ -353,9 +443,35 @@ function activate(context) {
       if (typeof msg.type === 'string' && msg.type.startsWith('history')) { await handleHistory(msg); return; }
       try {
         if (msg.type === 'cancelReview') { reviewCancellation?.cancel(); return; }
-        if (running && ['selectModel', 'loadInstructions', 'orchestrate', 'evaluate', 'chat', 'run', 'runBoth', 'import', 'setKey'].includes(msg.type)) return;
+        if (running && ['generatePrompt', 'selectModel', 'loadInstructions', 'orchestrate', 'evaluate', 'chat', 'run', 'runBoth', 'import', 'setKey'].includes(msg.type)) return;
         if (msg.type === 'compare') {
           await panel.webview.postMessage({ type: 'result', result: comparison(msg.experiment), revision: msg.revision });
+        } else if (msg.type === 'generatePrompt') {
+          if (msg.experiment.comparisonKind !== 'prompt') throw new Error('Open Prompt comparison to generate an edited draft.');
+          const request = optimizerRequest(msg.experiment, msg.guidance);
+          running = true;
+          reviewCancellation = new vscode.CancellationTokenSource();
+          await panel.webview.postMessage({ type: 'busy', value: true, kind: 'optimizer' });
+          try {
+            const model = await selectRunModel(vscode);
+            if (!model || disposed || reviewCancellation.token.isCancellationRequested) {
+              if (!disposed) await panel.webview.postMessage({ type: 'optimizerStatus', message: 'Draft generation cancelled.' });
+              return;
+            }
+            const result = await runWithVsCode(vscode, request, model, reviewCancellation.token);
+            if (!disposed) await panel.webview.postMessage({ type: 'optimizerDraft', draft: parseOptimizerDraft(result), revision: msg.revision });
+          } catch (error) {
+            if (!disposed) {
+              const cancelled = error instanceof vscode.CancellationError || reviewCancellation.token.isCancellationRequested;
+              await panel.webview.postMessage({ type: 'optimizerStatus', message: cancelled ? 'Draft generation cancelled.' : 'Draft generation failed: ' + error.message });
+              if (!cancelled) vscode.window.showErrorMessage('CompareLab: ' + error.message);
+            }
+          } finally {
+            reviewCancellation.dispose();
+            reviewCancellation = undefined;
+            running = false;
+            if (!disposed) await panel.webview.postMessage({ type: 'busy', value: false });
+          }
         } else if (msg.type === 'orchestrate') {
           await runTest(msg.experiment);
         } else if (msg.type === 'selectModel') {
@@ -501,6 +617,7 @@ function activate(context) {
         running = false;
         await panel.webview.postMessage({ type: 'busy', value: false });
         if (['orchestrate', 'evaluate', 'chat'].includes(msg.type)) await panel.webview.postMessage({ type: 'reviewStatus', message: error.message });
+        if (msg.type === 'generatePrompt') await panel.webview.postMessage({ type: 'optimizerStatus', message: error.message });
         vscode.window.showErrorMessage('CompareLab: ' + error.message);
       }
     }, undefined, context.subscriptions);

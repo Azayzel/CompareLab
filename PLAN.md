@@ -4,7 +4,7 @@
 
 Build a visual way to compare outputs from two or more AI models given the same prompt, and to evaluate subtle changes to prompts on the same model. Combine **Git diff** with QuillBot-like readable edit highlighting so a team can see what changed and judge what works best.
 
-Take inspiration from the user's Docker-image Web Vitals skill: capture an explicit baseline and candidate, control variables, record real measurements with provenance, surface confounders and incomplete runs, and publish reproducible results. Don't assume different wording implies a better answer.
+Take inspiration from Docker-image Web Vitals skill: capture an explicit baseline and candidate, control variables, record real measurements with provenance, surface confounders and incomplete runs, and publish reproducible results. Don't assume different wording implies a better answer.
 
 ## Product constraints
 

@@ -5,6 +5,9 @@ const { normalizedEndpoint, validateModelInput } = require('./providers');
 const { codeMindAlert, agentInstructions } = require('./inputs');
 const { isQueryEvidence, isDatadogEvidenceTool, DATADOG_LIMITS } = require('./datadog');
 const { activity, usageReport, efficiencyMetrics, validateUsageTurns, TOKEN_FIELDS } = require('./usage');
+const { validatePromptChanges } = require('./prompt-review');
+const { responseContent } = require('./response');
+const { validateCollection } = require('./prompt-evidence');
 
 const MAX_REPETITIONS = 5;
 const MAX_RECORD_BYTES = 8 * 1024 * 1024;
@@ -44,7 +47,7 @@ function composeAgentTask(instructions, incomingMessage) {
   return hasPlaceholder ? template.replace(placeholder, () => message) : template + '\n\n## Incoming message\n\n' + message;
 }
 
-function createTestPlan(input, { legacyBudget = false } = {}) {
+function createTestPlan(input, { legacyBudget = false, allowPendingEvidence = false, tokenAwareInput = false } = {}) {
   if (comparisonKind(input) === 'prompt') {
     const prompts = Object.fromEntries(['baseline', 'candidate'].map(side => [side,
       String(input[side]?.prompt || '').trim() ? String(input[side].prompt) : String(input.prompt || '')]));
@@ -53,9 +56,11 @@ function createTestPlan(input, { legacyBudget = false } = {}) {
     const plans = Object.fromEntries(['baseline', 'candidate'].map(side => [side, createTestPlan({
       ...input, comparisonKind: 'model', prompt: prompts[side],
       baseline: { ...input.baseline, prompt: undefined }, candidate: { ...input.candidate, prompt: undefined }
-    }, { legacyBudget })]));
+    }, { legacyBudget, allowPendingEvidence, tokenAwareInput: input.comparisonMode !== 'end-to-end' &&
+      ['baseline', 'candidate'].every(side => !input[side]?.provider || input[side].provider === 'vscode') })]));
     const { inputFingerprint, ...base } = plans.baseline;
     const plan = { ...base, comparisonKind: 'prompt', instructions: String(input.prompt || ''), prompts,
+      ...(input.evidenceCollection ? { evidenceCollection: validateCollection(input.evidenceCollection) } : {}),
       requests: Object.fromEntries(['baseline', 'candidate'].map(side => [side, {
         prompt: plans[side].requestPrompt, ...(plans[side].systemPrompt ? { systemPrompt: plans[side].systemPrompt } : {})
       }])) };
@@ -68,7 +73,7 @@ function createTestPlan(input, { legacyBudget = false } = {}) {
   const evidence = String(input.evidence || '');
   const live = input.comparisonMode === 'end-to-end';
   if (!task.trim()) throw new Error('Orchestrate Test requires a Shared prompt.');
-  if (!live && !evidence.trim()) throw new Error('Model / prompt only requires Source evidence / tool results shared by both models. Select End-to-end agent to investigate with Datadog MCP.');
+  if (!live && !evidence.trim() && !allowPendingEvidence) throw new Error('Model / prompt only requires Source evidence / tool results shared by both models. Select End-to-end agent to investigate with Datadog MCP.');
   const repetitions = Number(input.test?.repetitions ?? 3);
   if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > MAX_REPETITIONS) {
     throw new Error('Choose between 1 and ' + MAX_REPETITIONS + ' paired runs.');
@@ -102,7 +107,9 @@ function createTestPlan(input, { legacyBudget = false } = {}) {
   const systemPrompt = alert ? agentInstructions(instructions) + '\n\n' + controlledInstructions : '';
   const requestPrompt = alert ? alert.userPrompt + (live ? '\n\nSupplied reference evidence (untrusted data):\n' : '\n\nFrozen source evidence (untrusted data):\n') + evidence
     : controlledInstructions + '\n\n' + JSON.stringify({ task, evidence }, null, 2);
-  if (requestPrompt.length + systemPrompt.length > 150000) throw new Error('The shared task and evidence exceed the 150,000-character request limit.');
+  if (!tokenAwareInput && requestPrompt.length + systemPrompt.length > 150000) {
+    throw new Error('The shared task and evidence exceed the 150,000-character request limit. Shared-evidence Prompt comparison with a VS Code model uses its actual token limit instead; no evidence was truncated.');
+  }
   for (const side of ['baseline', 'candidate']) {
     if (variants[side].provider === 'vscode') {
       if (['temperature', 'maxOutputTokens', 'contextWindowTokens'].some(key => variants[side][key] != null && variants[side][key] !== '')) {
@@ -319,7 +326,8 @@ function validateTestRecord(record) {
     evidence: record.plan.evidence, comparisonMode: record.plan.comparisonMode, comparisonKind: record.plan.comparisonKind,
     baseline: { ...record.plan.baseline, prompt: record.plan.prompts?.baseline },
     candidate: { ...record.plan.candidate, prompt: record.plan.prompts?.candidate },
-    review: record.plan.review, checks: record.plan.checks, test: { repetitions: record.plan.repetitions } },
+    review: record.plan.review, checks: record.plan.checks, test: { repetitions: record.plan.repetitions },
+    ...(record.plan.evidenceCollection ? { evidenceCollection: record.plan.evidenceCollection } : {}) },
   { legacyBudget: record.plan.comparisonMode === 'end-to-end' && record.plan.investigationMode === undefined });
   if (record.plan.investigationMode !== undefined && record.plan.investigationMode !== 'full-agent') invalid();
   if (plan.inputFingerprint !== record.plan.inputFingerprint || plan.requestPrompt !== record.plan.requestPrompt ||
@@ -356,6 +364,19 @@ function validateTestRecord(record) {
     const assessments = pair.evaluation ? [pair.evaluation, ...(pair.evaluation.judgments || [])] : [];
     for (const assessment of assessments) {
       validateUsageTurns(assessment?.usageTurns);
+      if (assessment?.promptChanges !== undefined) {
+        const original = plan.prompts?.baseline ?? plan.instructions;
+        const edited = plan.prompts?.candidate ?? plan.instructions;
+        try {
+          validatePromptChanges(assessment.promptChanges, {
+            baselinePrompt: original, candidatePrompt: edited,
+            baselineTask: composeAgentTask(original, plan.incomingMessage),
+            candidateTask: composeAgentTask(edited, plan.incomingMessage),
+            baseline: responseContent(pair.baseline.result?.response), candidate: responseContent(pair.candidate.result?.response)
+          }, original === edited ? [{ type: 'equal', text: original }]
+            : [{ type: 'remove', text: original }, { type: 'add', text: edited }]);
+        } catch { invalid(); }
+      }
       if (!assessment || !['baseline', 'candidate', 'tie', 'insufficient_evidence'].includes(assessment.verdict) ||
           typeof assessment.summary !== 'string' || assessment.summary.length > 10000 ||
           !Array.isArray(assessment.criteria) || assessment.criteria.length > 6 || !Array.isArray(assessment.unknowns) ||

@@ -12,6 +12,15 @@
   let historyActions = [];
   let revealHistoryResult = false;
   let testRun = null;
+  let promptLayout = null;
+  let optimizerDraft = null;
+  let promptCanAdopt = false;
+  let promptReviewRunning = false;
+  let reviewStartedAt = 0;
+  let reviewClock = null;
+  let reviewPhase = 'prepare';
+  let reviewCancelling = false;
+  let evidenceCollection = null;
   const runMetadata = { a: {}, b: {} };
   const fields = ['model','prompt','response','provider','endpoint','tokenLimitField','reportedModel','modelVersion','contextWindowTokens','contextWindowSource','inputTokens','outputTokens','maxOutputTokens','finishReason','temperature'];
   const sharedModelFields = ['model', 'provider', 'endpoint', 'tokenLimitField', 'contextWindowTokens',
@@ -32,9 +41,14 @@
       comparisonKind,
       comparisonMode: $('comparisonMode').value || 'end-to-end',
       prompt: $('prompt').value, incomingMessage: $('incomingMessage').value, evidence: $('evidence').value, baseline, candidate,
+      ...(evidenceCollection ? { evidenceCollection } : {}),
       review: { checkOrder: $('checkOrder').checked },
       test: { repetitions: Number($('testRepetitions').value || 3) }, testRun,
-      checks: { requiredPhrases: $('checks').value.split(',').map(x => x.trim()).filter(Boolean) }
+      checks: { requiredPhrases: $('checks').value.split(',').map(x => x.trim()).filter(Boolean) },
+      ...(comparisonKind === 'prompt' ? { optimizer: {
+        goal: $('optimizerGoal').value, preserve: $('optimizerPreserve').value, success: $('optimizerSuccess').value,
+        draft: optimizerDraft ? { ...optimizerDraft, prompt: $('optimizerDraft').value } : null
+      } } : {})
     };
   };
   const save = () => {
@@ -50,6 +64,14 @@
   function restore(data) {
     if (!data || typeof data !== 'object') return;
     comparisonKind = data.comparisonKind === 'prompt' ? 'prompt' : 'model';
+    evidenceCollection = data.evidenceCollection || data.testRun?.plan?.evidenceCollection || null;
+    optimizerDraft = data.optimizer?.draft || null;
+    fill('optimizerGoal', data.optimizer?.goal || 'Clearer instructions');
+    fill('optimizerPreserve', data.optimizer?.preserve);
+    fill('optimizerSuccess', data.optimizer?.success);
+    fill('optimizerDraft', optimizerDraft?.prompt);
+    $('optimizerPreview').hidden = !optimizerDraft;
+    $('optimizerSummary').textContent = optimizerDraft?.summary || '';
     if (data.comparisonDrafts && typeof data.comparisonDrafts === 'object') comparisonDrafts = data.comparisonDrafts;
     fill('prompt', data.prompt);
     fill('incomingMessage', data.incomingMessage);
@@ -100,6 +122,7 @@
     const input = experiment();
     $('runBoth').disabled = busy || [input.baseline, input.candidate].some(variant => variant.provider === 'manual');
     $('orchestrate').disabled = $('runBoth').disabled;
+    $('promptTest').disabled = $('orchestrate').disabled;
     const repetitions = Number($('testRepetitions').value || 3);
     $('testBudget').textContent = repetitions * 2 + ($('comparisonMode').value === 'end-to-end' ? ' agent investigations; ' : ' generation requests; ') + repetitions * ($('checkOrder').checked ? 2 : 1) +
       ' review requests, plus up to ' + repetitions + ' citation corrections. ' +
@@ -110,21 +133,44 @@
   function updateComparisonLayout() {
     const prompt = comparisonKind === 'prompt';
     $('compareView').className = prompt ? 'comparison-prompt' : 'comparison-model';
+    $('promptTools').hidden = !prompt;
+    if (promptLayout !== prompt) {
+      $(prompt ? 'promptModelSlot' : 'a-modelSlot').appendChild($('a-modelSettings'));
+      for (const side of ['a', 'b']) $(prompt ? 'promptAdvanced' : side + '-editor').appendChild($(side + '-technicalSlot'));
+      $('promptAdvanced').open = !prompt;
+      $('promptAudit').open = !prompt;
+      $('evidenceOptions').open = !prompt;
+      $('shareActions').open = !prompt;
+      $(prompt ? 'promptProgressSlot' : 'reviewProgressSlot').appendChild($('reviewProgress'));
+      promptLayout = prompt;
+    }
+    $('promptModelSlot').hidden = !prompt;
+    for (const id of ['runBoth', 'compare', 'orchestrate', 'chat', 'evaluate', 'a-run']) $(id).hidden = prompt;
+    $('promptReviewOutputs').hidden = !prompt;
+    $('shareActionsLabel').hidden = !prompt;
+    $('historySave').textContent = prompt ? 'Save prompt comparison to History' : 'Save to history';
+    $('incomingMessageLabel').textContent = prompt ? 'Shared input / alert' : 'Incoming message / trigger';
+    $('evidenceOptionsLabel').textContent = prompt ? 'Shared evidence snapshot (optional; collected automatically)' : 'Source evidence (optional for live investigations)';
+    $('datadogBudgetGuidance').hidden = prompt;
+    if ($('comparisonMode').options) $('comparisonMode').options[1].textContent = prompt
+      ? 'Same evidence (collect once or reuse supplied snapshot)' : 'Model / prompt only (frozen evidence required)';
     $('sharedInstructions').hidden = prompt;
     $('comparisonDescription').textContent = prompt
-      ? 'Compare two prompt variants with one shared model. Both receive the same incoming message and evidence.'
+      ? 'Edit the prompt. Test the outputs. Keep only changes that help.'
       : 'Compare models using the same instructions and incoming message.';
     $('investigationDescription').textContent = prompt
-      ? 'End-to-end runs investigate each prompt independently with approved Datadog tools. Frozen evidence isolates prompt differences more closely.'
+      ? $('comparisonMode').value === 'end-to-end'
+        ? 'Independent investigations: evidence may differ, so prompt effects are harder to isolate.'
+        : 'Shared evidence: collect one Datadog snapshot if blank, then give both prompts the exact same evidence without live tools.'
       : 'End-to-end Orchestrate Test lets each model investigate independently with approved Datadog MCP tools. No pasted evidence is required.';
     $('b-modelSettings').hidden = prompt;
     $('b-runner').hidden = prompt;
     $('b-modelDetails').hidden = prompt;
     $('a-modelLabel').textContent = prompt ? 'Shared model (both prompts)' : 'Model';
     for (const side of ['a', 'b']) {
-      $(side + '-heading').textContent = prompt ? (side === 'a' ? 'Baseline prompt' : 'Candidate prompt') : side === 'a' ? 'Baseline' : 'Candidate';
+      $(side + '-heading').textContent = prompt ? (side === 'a' ? 'Original prompt' : 'Edited prompt') : side === 'a' ? 'Baseline' : 'Candidate';
       $(side + '-promptLabel').textContent = prompt ? 'Agent instructions / prompt variant' : 'Prompt override';
-      $(side + '-prompt').placeholder = prompt ? 'Enter ' + (side === 'a' ? 'baseline' : 'candidate') + ' instructions' : 'Uses shared prompt';
+      $(side + '-prompt').placeholder = prompt ? 'Enter ' + (side === 'a' ? 'original' : 'edited') + ' instructions' : 'Uses shared prompt';
       $(side + '-promptSection').hidden = !prompt && !$(side + '-prompt').value.trim();
       $(side + '-promptSection').open = prompt;
     }
@@ -132,6 +178,8 @@
   function invalidate() {
     revision++;
     $('results').hidden = true;
+    $('promptResults').hidden = true;
+    promptCanAdopt = false;
     $('evaluation').replaceChildren();
     $('reviewStatus').textContent = '';
     testRun = null;
@@ -160,6 +208,7 @@
     $('historyView').hidden = view !== 'history';
     $('compareView').setAttribute('aria-labelledby', (view === 'prompt' ? 'prompt' : 'compare') + 'Tab');
     $('currentActions').hidden = view === 'history';
+    $('shareActions').hidden = view === 'history';
   }
   function showView(view) {
     const nextKind = view === 'prompt' ? 'prompt' : 'model';
@@ -170,11 +219,12 @@
       const variant = { ...Object.fromEntries(sharedModelFields.map(key => [key, current.baseline[key]])), response: '' };
       const initial = nextKind === 'prompt' ? { ...current, prompt: '',
         baseline: { ...variant, prompt: current.baseline.prompt || current.prompt },
-        candidate: { ...variant, prompt: current.baseline.prompt || current.prompt } }
+        candidate: { ...variant, prompt: current.baseline.prompt || current.prompt }, comparisonMode: 'model-prompt-only',
+        test: { repetitions: 1 }, optimizer: null, evidenceCollection: null }
         : { ...current, prompt: current.baseline.prompt || current.prompt, baseline: variant, candidate: { ...variant } };
       restore(comparisonDrafts[nextKind] || { ...initial, comparisonKind: nextKind, testRun: null });
       save();
-      if ($('a-response').value || $('b-response').value) post('compare');
+      if (nextKind === 'prompt' || $('a-response').value || $('b-response').value) post('compare');
     }
     selectView(view);
     if (view === 'history') {
@@ -196,7 +246,7 @@
     if (!historyEntries.length) {
       const empty = make('div', '', 'review-empty');
       empty.append(make('h3', 'No saved comparisons yet'),
-        make('p', 'Finished orchestrated tests are saved automatically, including partial and cancelled runs. Use Save to history in Compare for other comparisons.'));
+        make('p', 'Prompt reviews and orchestrated tests are saved automatically, including partial and cancelled runs. Use Save / export to save a prompt draft or other comparison manually.'));
       list.appendChild(empty);
     }
     for (const entry of historyEntries) {
@@ -208,7 +258,9 @@
         ' · ' + (entry.comparisonKind === 'prompt' ? 'Prompt comparison' : 'Model comparison') +
         (entry.pairs ? ' · ' + entry.pairs + (entry.pairs === 1 ? ' paired run' : ' paired runs') : '') + ' · ' + historySize(entry.bytes || 0), 'notice'));
       if (entry.error) card.appendChild(make('p', entry.error + ' You can delete this entry or inspect the storage file.', 'warning-callout'));
-      else card.appendChild(make('p', 'Baseline: ' + entry.baseline + ' → Candidate: ' + entry.candidate, 'history-models'));
+      else card.appendChild(make('p', entry.comparisonKind === 'prompt'
+        ? 'Original and edited prompts · Shared model: ' + entry.baseline
+        : 'Baseline: ' + entry.baseline + ' → Candidate: ' + entry.candidate, 'history-models'));
       const actions = make('div', '', 'buttons');
       for (const [type, label] of [['historyOpen', 'Open in Compare'], ['historyDelete', 'Delete']]) {
         const button = make('button', label);
@@ -236,7 +288,7 @@
   function badge(status, limited = false) {
     const labels = { succeeded: 'Response ready', failed: 'Failed', running: 'Running', 'not-started': 'Not started',
       completed: 'Complete', 'completed-limited': 'Finished with limits', partial: 'Needs attention', cancelled: 'Cancelled', 'not-reviewed': 'Not reviewed',
-      reviewed: 'Reviewed', saved: 'Saved', unreadable: 'Unreadable', 'review-failed': 'Review failed', 'review-running': 'Review running', 'review-cancelled': 'Review cancelled' };
+      reviewed: 'Reviewed', saved: 'Saved', draft: 'Draft · not reviewed', unreadable: 'Unreadable', 'review-failed': 'Review failed', 'review-running': 'Review running', 'review-cancelled': 'Review cancelled' };
     return make('span', limited ? 'Budget-limited' : labels[status] || status, 'status-badge status-' + (limited ? 'limited' : status));
   }
   function metric(label, value, hint) {
@@ -311,9 +363,66 @@
     container.append(body, raw);
   }
 
+  function updateReviewProgress(phase, record = null) {
+    reviewPhase = phase;
+    if (!promptReviewRunning) return;
+    const titles = { prepare: 'Preparing prompt review', evidence: 'Collecting shared Datadog evidence',
+      original: 'Running original prompt', edited: 'Running edited prompt', review: 'Reviewing both outputs' };
+    const pair = record?.pairs.at(-1);
+    $('reviewProgressTitle').textContent = reviewCancelling ? 'Cancelling review...' : titles[phase];
+    if (pair) $('reviewProgressTitle').textContent += ' · Run ' + pair.number + ' of ' + record.plan.repetitions;
+    const steps = [['prepare', 'Prepare']];
+    if ($('comparisonMode').value !== 'end-to-end') steps.push(['evidence', $('evidence').value.trim() ? 'Shared evidence' : 'Collect evidence']);
+    steps.push(['original', 'Original output'], ['edited', 'Edited output'], ['review', 'Review outputs']);
+    const active = steps.findIndex(([key]) => key === phase);
+    $('reviewSteps').replaceChildren();
+    for (const [index, [key, title]] of steps.entries()) {
+      const actual = pair && (key === 'original' ? pair.baseline.status : key === 'edited' ? pair.candidate.status
+        : key === 'review' ? pair.evaluationStatus : 'succeeded');
+      const state = actual ? ({ succeeded: 'complete', running: 'active', failed: 'failed', cancelled: 'cancelled' }[actual] || 'pending')
+        : index < active ? 'complete' : index === active ? 'active' : 'pending';
+      const item = make('li', '', 'review-step');
+      item.setAttribute('data-state', state);
+      if (state === 'active') item.setAttribute('aria-current', 'step');
+      item.append(make('span', state === 'complete' ? 'Done' : state === 'failed' ? 'Failed' : state === 'cancelled' ? 'Stopped' : String(index + 1), 'step-marker'), make('span', title));
+      $('reviewSteps').appendChild(item);
+    }
+  }
+
+  function setPromptReviewRunning(value) {
+    promptReviewRunning = value;
+    $('reviewProgress').hidden = !value;
+    $('reviewProgress').setAttribute('aria-busy', String(value));
+    $('reviewStatus').hidden = value;
+    $('promptTest').textContent = value ? 'Review in progress...' : 'Review prompt change';
+    $(value ? 'progressCancelSlot' : 'cancelReviewSlot').appendChild($('cancelReview'));
+    if (reviewClock !== null) clearInterval(reviewClock);
+    reviewClock = null;
+    if (!value) {
+      $('cancelReview').textContent = 'Cancel';
+      return;
+    }
+    reviewCancelling = false;
+    $('cancelReview').textContent = 'Cancel review';
+    reviewStartedAt = Date.now();
+    const tick = () => {
+      const seconds = Math.floor((Date.now() - reviewStartedAt) / 1000);
+      $('reviewElapsed').textContent = Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0') + ' elapsed';
+    };
+    tick();
+    reviewClock = setInterval(tick, 1000);
+    $('reviewProgressDetail').textContent = 'Choose a model or approve Datadog access in VS Code if prompted. Neither prompt has run yet.';
+    updateReviewProgress('prepare');
+  }
+
   function renderTest(record, summary) {
     if (renderedTestId !== record.id) { expandedSections.clear(); renderedTestId = record.id; }
     const container = $('testResults');
+    if (comparisonKind === 'prompt' && record.status === 'running') {
+      const current = record.pairs.at(-1);
+      updateReviewProgress(current?.evaluationStatus === 'running' ? 'review'
+        : current?.candidate.status === 'running' ? 'edited' : 'original', record);
+    }
     container.hidden = false;
     const reviewed = record.pairs.filter(pair => pair.evaluationStatus === 'succeeded').length;
     const attempts = record.pairs.flatMap(pair => [pair.baseline, pair.candidate]);
@@ -552,6 +661,111 @@
     const checks = $('checksResults'); checks.replaceChildren(make('h2', 'Required phrase checks'));
     if (!result.checks.length) checks.appendChild(make('p', 'No checks configured.', 'notice'));
     for (const c of result.checks) checks.appendChild(make('p', c.phrase + ' · Baseline ' + (c.baseline ? 'Pass' : 'Fail') + ' · Candidate ' + (c.candidate ? 'Pass' : 'Fail')));
+    if (result.comparisonKind === 'prompt') renderPromptReview(result);
+  }
+  function renderChanges(container, spans, passages, label) {
+    container.replaceChildren();
+    if (!passages.length) {
+      container.appendChild(make('p', 'No changes.', 'notice'));
+      return;
+    }
+    container.appendChild(make('p', passages.length + (passages.length === 1 ? ' passage changed' : ' passages changed') +
+      ' · Unchanged sections hidden', 'notice'));
+    for (const [index, excerpt] of passages.entries()) {
+      const passage = make('section', '', 'change-passage');
+      passage.appendChild(make('h3', 'Change ' + (index + 1)));
+      const columns = make('div', '', 'change-pair');
+      for (const [side, title] of [['original', 'Original'], ['edited', 'Edited']]) {
+        const panel = make('div', '', 'change-version');
+        const text = make('div', '', 'change-text');
+        panel.append(make('strong', title, 'change-label'), text);
+        for (const span of excerpt[side]) text.appendChild(make('span', span.text, span.type));
+        if (!excerpt[side].some(span => span.text)) text.appendChild(make('span', 'No text', 'notice'));
+        columns.appendChild(panel);
+      }
+      passage.appendChild(columns);
+      container.appendChild(passage);
+    }
+    const full = make('details', '', 'result-details');
+    full.appendChild(make('summary', 'Show full ' + label + ' diff'));
+    const diff = make('div', '', 'diff');
+    for (const span of spans) diff.appendChild(make('span', span.text, span.type));
+    full.appendChild(diff);
+    container.appendChild(full);
+  }
+  function renderPromptReview(result) {
+    renderChanges($('promptDiff'), result.promptComparison?.spans || [], result.promptComparison?.passages || [], 'prompt');
+    const decision = result.promptDecision;
+    const container = $('promptResults');
+    const hasOutput = result.baseline.response.trim() || result.candidate.response.trim() || result.testRun;
+    container.hidden = !hasOutput;
+    if (!decision || !hasOutput) return;
+    const hero = make('section', '', 'prompt-verdict verdict-' + decision.verdict.toLowerCase().replaceAll(' ', '-'));
+    const record = result.testRun;
+    const reviewed = record ? record.pairs.filter(pair => pair.evaluationStatus === 'succeeded').length : result.evaluation ? 1 : 0;
+    const complete = record ? record.status === 'completed' && reviewed === record.plan.repetitions : reviewed === 1;
+    const state = complete ? 'Review complete' : reviewed ? 'Review incomplete' : 'Not reviewed';
+    hero.append(make('p', state.toUpperCase(), 'eyebrow'), make('h2', complete ? decision.verdict : state), make('strong', decision.action),
+      make('p', decision.reason), make('p', decision.caveat, 'notice'));
+    if (record) hero.appendChild(make('p', reviewed + ' / ' + record.plan.repetitions + ' output pairs reviewed.', 'notice'));
+    if (complete && !decision.changes.length) hero.appendChild(make('p',
+      'This saved review does not explain the prompt edits. Run Review prompt change for a change-focused assessment.', 'notice'));
+    promptCanAdopt = complete && decision.verdict === 'Better';
+    const adopt = make('button', 'Use edited prompt as original', 'primary');
+    adopt.id = 'adoptPrompt';
+    adopt.disabled = busy || !promptCanAdopt;
+    adopt.addEventListener('click', () => {
+      if (!promptCanAdopt || busy) return;
+      fill('a-prompt', $('b-prompt').value);
+      clearPromptOutputs(['a', 'b']);
+      invalidate(); save(); post('compare');
+    });
+    hero.appendChild(adopt);
+    container.replaceChildren(hero);
+    if (result.evidenceCollection) {
+      const collection = make('details', '', 'result-details');
+      collection.append(make('summary', 'Shared evidence collection (separate from prompt tests)'),
+        make('p', 'Collected ' + result.evidenceCollection.collectedAt + ' using ' + result.evidenceCollection.model +
+          '. Model turns: ' + result.evidenceCollection.modelRequestCount + '. Tool calls: ' + result.evidenceCollection.toolCallCount +
+          '. Not included in either prompt totals.'),
+        make('pre', JSON.stringify(result.evidenceCollection, null, 2), 'response-content'));
+      container.appendChild(collection);
+    }
+    for (const change of decision.changes) {
+      const item = make('article', '', 'prompt-change');
+      item.append(make('h3', change.change), make('span', change.effect, 'status-badge'),
+        make('p', change.impact), make('strong', change.recommendation));
+      const quotes = make('details', '', 'result-details');
+      quotes.appendChild(make('summary', 'See the prompt edit and output evidence'));
+      for (const citation of change.citations) {
+        const quote = make('blockquote', '');
+        quote.append(make('strong', ({ baselinePrompt: 'Original prompt', candidatePrompt: 'Edited prompt',
+          baselineTask: 'Original task', candidateTask: 'Edited task', baseline: 'Original output', candidate: 'Edited output' })[citation.source]),
+          make('pre', citation.quote, 'response-content'));
+        quotes.appendChild(quote);
+      }
+      item.appendChild(quotes); container.appendChild(item);
+    }
+    const outputs = make('details', '', 'result-details');
+    outputs.appendChild(make('summary', 'Output changes'));
+    const outputDiff = make('div', '');
+    renderChanges(outputDiff, result.spans, result.outputPassages || [], 'output');
+    outputs.appendChild(outputDiff);
+    container.appendChild(outputs);
+    if (result.testRun) {
+      for (const pair of result.testRun.pairs) {
+        for (const side of ['baseline', 'candidate']) if (pair[side].error) container.appendChild(make('p',
+          'Run ' + pair.number + ' ' + (side === 'baseline' ? 'original' : 'edited') + ': ' + pair[side].error, 'warning-callout'));
+        if (pair.evaluationError) container.appendChild(make('p', 'Run ' + pair.number + ' review: ' + pair.evaluationError, 'warning-callout'));
+      }
+    }
+  }
+  function clearPromptOutputs(sides) {
+    for (const side of sides) {
+      runMetadata[side] = { modelVendor: runMetadata[side].modelVendor };
+      for (const key of ['response', 'reportedModel', 'modelVersion', 'inputTokens', 'outputTokens', 'finishReason']) fill(side + '-' + key, '');
+      $(side + '-status').textContent = '';
+    }
   }
   function renderTraces(result) {
     const container = $('traces');
@@ -625,7 +839,7 @@
     if (msg.type === 'result' && msg.revision === revision) {
       render(msg.result);
       if (revealHistoryResult && activeView !== 'history') {
-        const target = $(msg.result.testRun ? 'testResults' : 'results');
+        const target = $(comparisonKind === 'prompt' ? 'promptResults' : msg.result.testRun ? 'testResults' : 'results');
         target.focus({ preventScroll: true });
         target.scrollIntoView({ block: 'start' });
       }
@@ -634,7 +848,9 @@
     if (msg.type === 'imported') { restore(msg.experiment); save(); post('compare'); }
     if (msg.type === 'instructionsLoaded') {
       fill(['a', 'b'].includes(msg.side) ? msg.side + '-prompt' : 'prompt', msg.prompt);
+      if (comparisonKind === 'prompt') clearPromptOutputs([msg.side === 'a' ? 'a' : 'b']);
       invalidate(); updateComparisonLayout(); save();
+      if (comparisonKind === 'prompt') post('compare');
     }
     if (msg.type === 'modelSelected' && ['a', 'b'].includes(msg.side)) {
       const side = msg.side;
@@ -643,25 +859,54 @@
       fill(side + '-model', msg.model.id);
       fill(side + '-contextWindowSource', 'unverified');
       runMetadata[side] = { modelVendor: msg.model.vendor };
+      if (comparisonKind === 'prompt') clearPromptOutputs(['a', 'b']);
       invalidate(); updateRunner(side); save();
     }
-    if (msg.type === 'testFinished') { restore(msg.experiment); save(); post('compare'); }
+    if (msg.type === 'testFinished') {
+      restore(msg.experiment);
+      if (comparisonKind === 'prompt') revealHistoryResult = true;
+      save(); post('compare');
+    }
+    if (msg.type === 'sharedEvidence' && comparisonKind === 'prompt') {
+      fill('evidence', msg.evidence);
+      evidenceCollection = msg.evidenceCollection;
+      save();
+    }
     if (msg.type === 'testUpdate') {
       testRun = msg.record;
       renderTest(testRun, msg.summary);
       $('reviewStatus').textContent = msg.message;
+      if (promptReviewRunning) $('reviewProgressDetail').textContent = msg.message;
       save();
     }
     if (msg.type === 'runResult' && ['a','b'].includes(msg.side)) applyRun(msg.side, msg.result);
     if (msg.type === 'runStatus' && ['a','b'].includes(msg.side)) $(msg.side + '-status').textContent = msg.message;
-    if (msg.type === 'reviewStatus') $('reviewStatus').textContent = msg.message;
+    if (msg.type === 'reviewStatus') {
+      $('reviewStatus').textContent = msg.message;
+      if (promptReviewRunning) {
+        $('reviewProgressDetail').textContent = msg.message;
+        if (msg.phase) updateReviewProgress(msg.phase);
+      }
+    }
+    if (msg.type === 'optimizerStatus') $('optimizerStatus').textContent = msg.message;
+    if (msg.type === 'optimizerDraft' && msg.revision === revision && comparisonKind === 'prompt') {
+      optimizerDraft = msg.draft;
+      fill('optimizerDraft', msg.draft.prompt);
+      $('optimizerSummary').textContent = msg.draft.summary;
+      $('optimizerPreview').hidden = false;
+      $('optimizerStatus').textContent = 'Draft ready. Review it before applying; neither prompt has changed.';
+      save();
+    }
     if (msg.type === 'busy') {
       busy = msg.value;
-      document.querySelectorAll('input,textarea,select,button').forEach(element => { element.disabled = busy; });
-      $('cancelReview').hidden = !busy || !['evaluation', 'test', 'run'].includes(msg.kind);
+      document.querySelectorAll('input,textarea,select,button').forEach(element => {
+        element.disabled = busy || element.id === 'adoptPrompt' && !promptCanAdopt;
+      });
+      $('cancelReview').hidden = !busy || !['evaluation', 'test', 'run', 'optimizer'].includes(msg.kind);
       $('cancelReview').disabled = false;
       if (busy && msg.kind === 'evaluation') renderEvaluation(null);
       if (busy && msg.kind === 'test') invalidate();
+      setPromptReviewRunning(busy && msg.kind === 'test' && comparisonKind === 'prompt');
       for (const side of ['a','b']) updateRunner(side);
       updateHistoryControls();
     }
@@ -684,13 +929,47 @@
   $('compare').addEventListener('click', () => post('compare'));
   $('evaluate').addEventListener('click', () => post('evaluate'));
   $('chat').addEventListener('click', () => post('chat'));
-  $('cancelReview').addEventListener('click', () => post('cancelReview'));
+  $('cancelReview').addEventListener('click', () => {
+    if (promptReviewRunning) {
+      reviewCancelling = true;
+      $('cancelReview').disabled = true;
+      $('cancelReview').textContent = 'Cancelling...';
+      updateReviewProgress(reviewPhase);
+      $('reviewProgressDetail').textContent = 'Waiting for the active request to stop. Any completed work will be kept in History.';
+    }
+    post('cancelReview');
+  });
   $('import').addEventListener('click', () => post('import'));
   $('export').addEventListener('click', () => post('export'));
   $('report').addEventListener('click', () => post('report'));
   $('htmlReport').addEventListener('click', () => post('htmlReport'));
   $('runBoth').addEventListener('click', () => post('runBoth'));
   $('orchestrate').addEventListener('click', () => post('orchestrate'));
+  $('promptTest').addEventListener('click', () => post('orchestrate'));
+  $('promptFreshEvidence').addEventListener('click', () => {
+    fill('evidence', '');
+    fill('comparisonMode', 'model-prompt-only');
+    evidenceCollection = null;
+    clearPromptOutputs(['a', 'b']);
+    invalidate(); save(); post('orchestrate');
+  });
+  $('promptReviewOutputs').addEventListener('click', () => post('evaluate'));
+  $('generatePrompt').addEventListener('click', () => {
+    $('optimizerStatus').textContent = 'Choosing a rewriting model...';
+    post('generatePrompt', { guidance: { goal: $('optimizerGoal').value, preserve: $('optimizerPreserve').value, success: $('optimizerSuccess').value } });
+  });
+  $('applyPromptDraft').addEventListener('click', () => {
+    if (busy || !optimizerDraft) return;
+    const draft = $('optimizerDraft').value;
+    if (!draft.trim() || draft.length > 150000) {
+      $('optimizerStatus').textContent = 'Draft must contain 1 to 150,000 characters.';
+      return;
+    }
+    fill('b-prompt', draft);
+    clearPromptOutputs(['b']);
+    invalidate(); save(); post('compare');
+    $('optimizerStatus').textContent = 'Draft applied to the edited prompt. Review the diff, then test it explicitly.';
+  });
   $('loadInstructions').addEventListener('click', () => post('loadInstructions'));
   for (const side of ['a','b']) {
     $(side + '-loadInstructions').addEventListener('click', () => post('loadInstructions', { side }));
@@ -703,16 +982,26 @@
     });
   }
   document.querySelectorAll('input,textarea,select').forEach(el => el.addEventListener('input', () => {
+    if (el.id?.startsWith('optimizer')) { revision++; save(); return; }
+    if (comparisonKind === 'prompt') {
+      if (el.id === 'evidence') evidenceCollection = null;
+      if (el.id === 'incomingMessage' && evidenceCollection) { fill('evidence', ''); evidenceCollection = null; }
+      if (['a-prompt', 'b-prompt'].includes(el.id)) clearPromptOutputs([el.id.slice(0, 1)]);
+      else if (!/response$/.test(el.id) && !['checks', 'testRepetitions', 'checkOrder', 'comparisonMode'].includes(el.id)) clearPromptOutputs(['a', 'b']);
+    }
     if (/^[ab]-/.test(el.id)) {
       const side = el.id.slice(0, 1);
       runMetadata[side] = /-(model|provider)$/.test(el.id) ? {} : { modelVendor: runMetadata[side].modelVendor };
     }
     invalidate();
     updateRunner('a');
+    updateComparisonLayout();
     save();
+    if (comparisonKind === 'prompt') post('compare');
   }));
   restore(vscode.getState());
+  updateComparisonLayout();
   for (const side of ['a','b']) updateRunner(side);
   updateHistoryControls();
-  if ($('a-response').value || $('b-response').value) post('compare');
+  if (comparisonKind === 'prompt' || $('a-response').value || $('b-response').value) post('compare');
 })();

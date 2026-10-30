@@ -2,6 +2,7 @@
 
 const { createHash } = require('node:crypto');
 const { usageTurn } = require('./usage');
+const { PROMPT_REVIEW_INSTRUCTIONS } = require('./prompt-review');
 const { resolvePrompt, reviewPacket, parseAssessment, CitationValidationError, REVIEW_RUBRIC, REVIEW_INSTRUCTIONS } = require('./core');
 const MAX_PROMPT_CHARACTERS = 150000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -119,12 +120,15 @@ async function resolveRunModels(vscode, variants, { requireTools = false } = {})
   return selected;
 }
 
-async function runWithVsCode(vscode, input, model, token, { conversation, tools } = {}) {
+async function runWithVsCode(vscode, input, model, token, { conversation, tools, tokenAwareInput = false } = {}) {
   assertCallableModel(model);
   const prompt = String(input.prompt || '');
   const systemPrompt = String(input.systemPrompt || '');
   if (!prompt.trim()) throw new Error('Enter a prompt before running');
-  if (prompt.length + systemPrompt.length > MAX_PROMPT_CHARACTERS) throw new Error('Prompt exceeds the 150,000-character limit');
+  if (!tokenAwareInput && prompt.length + systemPrompt.length > MAX_PROMPT_CHARACTERS) throw new Error('Prompt exceeds the 150,000-character limit');
+  if (tokenAwareInput && (!Number.isSafeInteger(model.maxInputTokens) || model.maxInputTokens <= 0)) {
+    throw new Error('The selected model does not report a usable input-token limit. Select another shared model; evidence was not truncated.');
+  }
   const cancellation = new vscode.CancellationTokenSource();
   const listener = token?.onCancellationRequested?.(() => cancellation.cancel());
   if (token?.isCancellationRequested) cancellation.cancel();
@@ -147,10 +151,20 @@ async function runWithVsCode(vscode, input, model, token, { conversation, tools 
       return vscode.LanguageModelChatMessage.User(message.content);
     });
     let estimatedInputTokens = 0;
-    for (const message of messages) estimatedInputTokens += await model.countTokens(message, cancellation.token);
+    for (const message of messages) {
+      const count = await model.countTokens(message, cancellation.token);
+      if (tokenAwareInput && (!Number.isSafeInteger(count) || count <= 0)) {
+        throw new Error('The selected model returned an invalid input-token count. Select another shared model; evidence was not truncated.');
+      }
+      estimatedInputTokens += count;
+    }
     if (tools?.length) estimatedInputTokens += await model.countTokens(JSON.stringify(tools), cancellation.token);
     check();
-    if (estimatedInputTokens >= model.maxInputTokens) throw new Error('The input exceeds the selected VS Code model\'s input limit.');
+    if (tokenAwareInput ? estimatedInputTokens > model.maxInputTokens : estimatedInputTokens >= model.maxInputTokens) {
+      throw new Error('The input needs ' + estimatedInputTokens.toLocaleString('en-US') + ' tokens, but model ' + model.id +
+        ' reports an input limit of ' + model.maxInputTokens.toLocaleString('en-US') +
+        '. Select a larger-context shared model. All evidence was preserved; nothing was truncated.');
+    }
     const response = await model.sendRequest(messages, tools?.length ? { tools: tools.map(({ name, description, inputSchema }) =>
       ({ name, description, inputSchema })) } : {}, cancellation.token);
     let text = '';
@@ -223,7 +237,7 @@ async function evaluateWithCopilot(vscode, input, model, token, progress = () =>
     let correction = '';
     while (true) {
       checkCancellation();
-      const instructions = REVIEW_INSTRUCTIONS + correction;
+      const instructions = REVIEW_INSTRUCTIONS + (input.comparisonKind === 'prompt' ? PROMPT_REVIEW_INSTRUCTIONS : '') + correction;
       const messages = [vscode.LanguageModelChatMessage.User(instructions),
         vscode.LanguageModelChatMessage.User(packetText)];
       let inputTokens = 0;
@@ -266,7 +280,11 @@ async function evaluateWithCopilot(vscode, input, model, token, progress = () =>
         citationRepairs++;
         correction = '\nPrevious citation validation failed: ' + error.message +
           ' Return the complete assessment again. Copy short quotes verbatim from the supplied source keys.' +
-          ' Do not paraphrase or combine passages. Use insufficient_evidence for criteria that cannot be supported.';
+          ' Do not paraphrase or combine passages. Use insufficient_evidence for criteria that cannot be supported.' +
+          (input.comparisonKind === 'prompt' ? ' For EACH promptChanges entry, put the promptA/promptB edit quote AND' +
+            ' an A output quote AND a B output quote together in that entry\'s citations array.' +
+            ' A readable prompt quote can cross diff spans and include unchanged words, but must overlap added/removed text.' +
+            ' Copy exact wording from promptA/promptB. Criteria citations do not count as promptChanges citations.' : '');
       }
     }
   }
@@ -290,6 +308,7 @@ async function evaluateWithCopilot(vscode, input, model, token, progress = () =>
   return {
     verdict, summary, criteria, unknowns, orderConsistent, judgments, rubricVersion: 3,
     preferenceEstablished: orderConsistent !== false && judgments.every(judgment => judgment.preferenceEstablished),
+    ...(first.promptChanges ? { promptChanges: first.promptChanges } : {}),
     requestCount: inputTokenEstimates.length, citationRepairs, usageTurns,
     inputFingerprint: evaluationKey(input), elapsedMs: Date.now() - started, inputTokenEstimates,
     model: { id: model.id, name: model.name, vendor: model.vendor, version: model.version, maxInputTokens: model.maxInputTokens },

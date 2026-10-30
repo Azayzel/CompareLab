@@ -23,13 +23,32 @@ Requires **VS Code 1.90+** and **Node.js 20+** for development.
 ### Model and prompt comparison tabs
 
 - **Model comparison** (default): choose Baseline and Candidate models and supply one shared prompt. Result cards and HTML reports use the model name as their prominent heading, with Baseline/Candidate as a smaller secondary label. Raw response editors are collapsed so long reports do not dominate setup. Saved prompt overrides are retained under **Advanced: saved prompt override**, not silently discarded; clear or update an override before rerunning if the shared prompt changed.
-- **Prompt comparison**: select **one shared model**, then enter or load Baseline and Candidate instruction variants separately. Both variants use the same provider, endpoint, and generation settings, incoming trigger, and evidence. **Run both**, **Orchestrate Test**, text comparison, evaluation, and exports all use each variant's own task. Frozen evidence isolates prompt differences more closely than independent live investigations.
+- **Prompt comparison**: a dedicated prompt-edit workflow, not another model dashboard. Select **one shared model**, edit **Original prompt** and **Edited prompt**, and compare grouped **Original → Edited** passages. Related edits on the same or adjacent lines share one card, with local sentence/bullet context and only changed words highlighted—not a separate box for every added or removed word. Unrelated unchanged sections stay hidden; **Show full prompt diff** restores the complete context. Passages sit side by side on wide screens and stack on narrow screens. Identical prompts say **No changes.** **Output changes** and HTML reports use the same presentation; full text remains intact in editors and exports. The main review shows **Better**, **Worse**, or **No clear improvement**, with up to three concrete recommendations linking a changed prompt passage to quotes from both outputs. Full outputs, model metrics, tool traces, and detailed reviews stay under expandable technical details.
 - Each comparison tab keeps its own draft, including responses and test records, across tab switches and webview restoration. The initial prompt draft starts from your current baseline/shared instructions without copying old responses. Exports contain only the active comparison, not the other tab's draft. Importing or opening history selects the matching comparison type.
 - **History** remains available alongside both workflows. Comparison-type switching is disabled during an active run; you can still browse history and return to the running comparison.
+
+**Save prompt comparisons:** finished prompt tests automatically create History snapshots, including partial/cancelled tests. To save edits before running a test, open **Save / export → Save prompt comparison to History**. Drafts are labeled **Draft · not reviewed**, not mistaken for reviewed results. Snapshots preserve both prompts, shared input/evidence, guided drafts, and any retained outputs/reviews and collection usage. Open one from **History** to restore an editable copy in Prompt comparison without running models or overwriting the saved snapshot. Saving again creates a new entry. History is local to this VS Code profile (latest 50 entries / 100 MiB).
 
 After an ordinary model run, its exact instruction template is pinned as the side's prompt so exported comparisons remain reproducible. Existing JSON experiments without a comparison type continue to open in Model comparison.
 
 Empty or whitespace-only overrides use the **Shared prompt**; meaningful overrides keep their exact text. If a task is genuinely missing, the error names Baseline, Candidate, or both and asks for a Shared prompt or the corresponding override. Empty source evidence does not cause a missing-task error.
+
+### Testing a prompt change
+
+1. Open **Prompt comparison**, select the shared model, and enter or load your original instructions. Edit the second prompt manually, or expand **Help me improve this prompt**: choose a goal, describe constraints to keep, and optionally describe a successful output. **Generate edited draft** explicitly runs a selected rewriting model without Datadog tools. Review/edit its preview and click **Apply draft to edited prompt**. This never changes the original or starts a test.
+2. Enter the shared input / alert, then click **Review prompt change**. This single action runs both prompts and reviews their outputs automatically; there is no separate Run, Orchestrate, or Evaluate step in Prompt comparison. New prompt comparisons default to **one paired run**, with a reversed-order review. When evidence is blank, CompareLab collects one read-only Datadog snapshot using the shared model, then sends the exact raw query results to both prompts **without live tools**. Supplied evidence is reused instead. This holds facts constant so different discovered evidence is not mistaken for a prompt improvement.
+3. Read the verdict and concise recommendations. Expand their evidence to see the specific prompt edit and output quotes. **Use edited prompt as original** is enabled only for a supported **Better** verdict; it copies the edited instructions to the original and clears old outputs/reviews. **Worse** recommends retaining the original; **No clear improvement** means do not adopt on the strength of this test.
+4. Test representative alerts before broad adoption. A supported verdict requires completed comparisons, consistent reversed-order judgments, cited substantive benefits (not just prettier wording), verified grounding, and no conflicting grounding/safety findings or reported prompt regressions. Missing reviews, failures, identical prompts, legacy reviews without change recommendations, or uncertain attribution do not establish improvement.
+
+The shared snapshot is retained in history/exports and reused when you edit a prompt or rerun the comparison. Changing the incoming alert clears an automatically collected snapshot; manually supplied evidence remains under your control. **Test settings and saved outputs (optional)** exposes **Collect fresh evidence and test prompts**, additional paired runs, providers/settings, pasted outputs, and **End-to-end agent** for independent investigations. Saved drafts retain their selected mode; switch older drafts to **Same evidence** to use the new default workflow. Independent mode tests the whole investigation (including query choices), but different evidence prevents clean attribution to the prompt edit.
+
+A progress panel beside **Review prompt change** shows preparation, evidence collection, each prompt output, and output review, with elapsed time, live request/tool activity, and **Cancel review** together. Stages reflect actual work, not an estimated percentage or completion time.
+
+Each prompt-edit recommendation must quote a real instruction change and both outputs. Prompt quotes can include surrounding unchanged words; they are checked against the exact source and must overlap an edit. Invalid citations trigger at most one correction request; unsupported recommendations remain blocked, with the missing requirement identified in the error.
+
+**Review pasted outputs only**, inside the optional settings, reviews supplied responses without generating new ones. Without controlled replay provenance, it may provide useful cited observations but will not establish a prompt improvement. The result explicitly identifies **Not reviewed**, **Review incomplete**, or **Review complete**, and shows completed review counts and any run/review errors. A failed or missing review is not presented as a completed "No clear improvement" judgment. Completed results are brought into view automatically. Text highlighting alone is never a quality judgment. HTML and Markdown exports preserve the prompt-change review and evidence quotes; saved comparisons can be reopened without rerunning anything.
+
+Snapshot collection usage is recorded separately from both prompt generations and evaluator usage. Guided draft usage is retained with the draft, also outside the test totals. Shared-evidence prompt tests using a VS Code model preserve the complete snapshot and count the actual request messages against that model's reported input-token limit, rather than the fixed 150,000-character generation limit. Exact-limit requests are allowed; oversized requests report the required and available tokens and require a larger-context model. Missing/invalid token counts or input limits fail explicitly. Endpoint providers and other generation paths retain the character limit. Timeout, record-size, and cancellation limits still apply; evidence is not silently shortened to fit. A failed collection stops explicitly before either prompt is tested.
 
 ### Visual HTML export
 
@@ -51,13 +70,17 @@ npm run build
 
 This checks all JavaScript syntax, verifies required extension assets, prepares the ignored `dist/` directory, and runs the complete test suite. No `npm install` or registry access is needed. CI uses the same command.
 
-To create an installable VS Code extension:
+To create a local, installable VS Code extension file for sharing (no publishing required):
 
 ```sh
 npm run package
 ```
 
-This uses the standard `@vscode/vsce` packager through `npx`, runs the build and tests through VS Code's prepublish hook, and writes **`dist/comparelab.vsix`**. The packager is downloaded on demand and is not version-pinned; it requires approved npm access and a Node version supported by the resolved packager. No runtime dependencies are bundled, and the allowlist excludes tests, examples, local exports, and workspace settings. Repeating the command replaces the generated VSIX.
+This uses the standard `@vscode/vsce` packager through `npx`, runs the build and tests through VS Code's prepublish hook, and writes **`dist/comparelab.vsix`**. Despite the hook's name, this command **does not upload or publish anything to npm or the VS Code Marketplace**. npm is used only to download the packaging tool; no npm or Marketplace publishing account is required.
+
+The packager is downloaded on demand and is not version-pinned; it requires approved npm access and a Node version supported by the resolved packager. No runtime dependencies are bundled, and the allowlist excludes tests, examples, local exports, and workspace settings. Repeating the command replaces the generated VSIX.
+
+**Share directly:** send `dist/comparelab.vsix` to the recipient through your approved file-sharing channel. They can install that file using the instructions below without cloning the repository, building the extension, or downloading the packager. Their own model access and, for end-to-end investigations, a configured and authenticated Datadog MCP connection are still required; your credentials and local comparison history are not bundled.
 
 **Install locally:** in VS Code, open the Command Palette, run **Extensions: Install from VSIX...**, select `dist/comparelab.vsix`, and reload if prompted. Then run **CompareLab: Compare Model Outputs** in your normal VS Code window—no Extension Development Host is needed. If the `code` CLI is installed, you can alternatively run:
 
@@ -65,7 +88,7 @@ This uses the standard `@vscode/vsce` packager through `npx`, runs the build and
 code --install-extension dist/comparelab.vsix --force
 ```
 
-Packaging does not publish to the Marketplace. If npm returns **403 Forbidden** for `@vscode/vsce`, resolve access through your approved npm registry or administrator. `npm run build` still works offline, but a VSIX cannot be produced until the packager is accessible.
+**Packaging download blocked:** if npm returns **403 Forbidden** for `@vscode/vsce`, the packaging-tool download was blocked, not an attempt to publish the extension. Resolve access through your approved npm registry or administrator. `npm run build` still works offline, but it does not create a VSIX; packaging requires an accessible packager.
 
 ## Orchestrate Test
 

@@ -29,6 +29,52 @@ h1 { letter-spacing: 0; }
 .columns section textarea.prompt-override { min-height: 60px; }
 .comparison-prompt .prompt-override-details > summary { display: none; }
 .comparison-prompt .prompt-override-details textarea { min-height: 220px; }
+.comparison-model > #promptAdvanced > summary, .comparison-model > #promptAudit > summary,
+.comparison-model #evidenceOptions > summary { display: none; }
+.comparison-model #promptFreshEvidence { display: none; }
+.comparison-prompt > #promptAdvanced, .comparison-prompt > #promptAudit { margin-top: 20px; }
+#promptTools { margin-top: 20px; }
+#promptTools h2 { margin-top: 24px; }
+.review-progress { margin: 16px 0; padding: 18px; border: 1px solid var(--vscode-focusBorder); border-radius: 8px; background: var(--vscode-textCodeBlock-background); }
+.review-progress-heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.review-progress-heading h3 { margin: 0; flex: 1; min-width: 150px; font-size: 15px; }
+#reviewElapsed { font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); font-size: 12px; }
+.progress-spinner { width: 15px; height: 15px; border: 2px solid var(--vscode-panel-border); border-top-color: var(--vscode-focusBorder); border-radius: 50%; animation: review-spin 1s linear infinite; flex-shrink: 0; }
+.review-steps { display: flex; flex-wrap: wrap; gap: 10px 18px; list-style: none; padding: 0; margin: 18px 0; }
+.review-step { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--vscode-descriptionForeground); }
+.step-marker { border: 1px solid var(--vscode-panel-border); border-radius: 12px; padding: 2px 6px; font-size: 10px; }
+.review-step[data-state="active"] { color: var(--vscode-foreground); font-weight: 600; }
+.review-step[data-state="active"] .step-marker { border-color: var(--vscode-focusBorder); }
+.review-step[data-state="complete"] .step-marker { color: var(--vscode-testing-iconPassed, #388a34); }
+.review-step[data-state="failed"] .step-marker, .review-step[data-state="cancelled"] .step-marker { color: var(--vscode-errorForeground); }
+.progress-detail { line-height: 1.6; overflow-wrap: anywhere; }
+.review-progress .notice { margin: 10px 0 16px; }
+@keyframes review-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .progress-spinner { animation: none; } }
+.change-passage { margin: 18px 0; border: 1px solid var(--vscode-panel-border); border-radius: 8px; overflow: hidden; }
+.change-passage > h3 { margin: 0; padding: 10px 14px; font-size: 12px; border-bottom: 1px solid var(--vscode-panel-border); }
+.change-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.change-version { min-width: 0; padding: 14px; }
+.change-version + .change-version { border-left: 1px solid var(--vscode-panel-border); }
+.change-label { display: block; margin-bottom: 10px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+.change-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; color: var(--vscode-foreground); }
+.change-text .add { background: rgba(36,166,83,.20); text-decoration: underline; text-decoration-color: var(--vscode-testing-iconPassed, #388a34); }
+.change-text .remove { background: rgba(222,70,70,.18); text-decoration: line-through; }
+@media (max-width: 720px) {
+  .change-pair { grid-template-columns: minmax(0, 1fr); }
+  .change-version + .change-version { border-left: 0; border-top: 1px solid var(--vscode-panel-border); }
+}
+#promptResults { margin-top: 24px; overflow-wrap: anywhere; }
+.prompt-verdict, .prompt-change { border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 20px; margin: 14px 0; }
+.prompt-verdict h2 { font-size: 24px; }
+.prompt-verdict button { margin-top: 14px; }
+.verdict-better { border-left: 4px solid var(--vscode-testing-iconPassed, #388a34); }
+.verdict-worse { border-left: 4px solid var(--vscode-errorForeground, #f14c4c); }
+.prompt-change h3 { font-size: 15px; }
+.prompt-change p, .prompt-verdict p { line-height: 1.6; }
+.prompt-change strong { line-height: 1.5; }
+#optimizerPreview { margin-top: 18px; }
+#optimizerDraft { min-height: 220px; }
 .raw-editor { border-top: 1px solid var(--vscode-panel-border); padding-top: 6px; }
 .evidence-label { margin-top: 16px; }
 .actionbar, .review-actions { flex-wrap: wrap; }
