@@ -6,7 +6,7 @@ const ALERT_FIELDS = ['eventId', 'monitorId', 'title', 'body', 'alertStatus', 't
   'alertCycleKey', 'endTimestamp', 'followUpOfEventId', 'previousAnalysis', 'link', 'tags', 'service', 'resource', 'hostname',
   'kubeDeployment', 'kubeNamespace', 'metricNamespace', 'source', 'platform', 'firebaseAppId', 'appVersion', 'crashlyticsIssueId', 'firebaseAlertType'];
 
-function codeMindAlert(message) {
+function codeMindAlert(message, { legacyDatadog = false } = {}) {
   let parsed;
   try { parsed = JSON.parse(message); } catch { return null; }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
@@ -53,7 +53,7 @@ function codeMindAlert(message) {
   for (const key of ALERT_FIELDS.filter(key => key !== 'priority')) {
     if (alert[key] !== null && typeof alert[key] !== 'string') throw new Error('CodeMind alert ' + key + ' must be a string or null.');
   }
-  return { format, alert, userPrompt: 'Analyze this Datadog alert event:\n' + JSON.stringify(alert) };
+  return { format, alert, userPrompt: 'Analyze this ' + (legacyDatadog ? 'Datadog ' : '') + 'alert event:\n' + JSON.stringify(alert) };
 }
 
 function agentInstructions(content) {

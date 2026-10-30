@@ -21,6 +21,7 @@
   let reviewPhase = 'prepare';
   let reviewCancelling = false;
   let evidenceCollection = null;
+  let toolSelection = [];
   const runMetadata = { a: {}, b: {} };
   const fields = ['model','prompt','response','provider','endpoint','tokenLimitField','reportedModel','modelVersion','contextWindowTokens','contextWindowSource','inputTokens','outputTokens','maxOutputTokens','finishReason','temperature'];
   const sharedModelFields = ['model', 'provider', 'endpoint', 'tokenLimitField', 'contextWindowTokens',
@@ -40,6 +41,7 @@
     return {
       comparisonKind,
       comparisonMode: $('comparisonMode').value || 'end-to-end',
+      toolSelection,
       prompt: $('prompt').value, incomingMessage: $('incomingMessage').value, evidence: $('evidence').value, baseline, candidate,
       ...(evidenceCollection ? { evidenceCollection } : {}),
       review: { checkOrder: $('checkOrder').checked },
@@ -65,6 +67,8 @@
     if (!data || typeof data !== 'object') return;
     comparisonKind = data.comparisonKind === 'prompt' ? 'prompt' : 'model';
     evidenceCollection = data.evidenceCollection || data.testRun?.plan?.evidenceCollection || null;
+    toolSelection = data.toolSelection || data.testRun?.plan?.toolCatalog?.map(tool => tool.name) || [];
+    updateToolSummary();
     optimizerDraft = data.optimizer?.draft || null;
     fill('optimizerGoal', data.optimizer?.goal || 'Clearer instructions');
     fill('optimizerPreserve', data.optimizer?.preserve);
@@ -103,6 +107,10 @@
     if (className) el.className = className;
     return el;
   }
+  function updateToolSummary() {
+    $('toolSelectionSummary').textContent = toolSelection.length
+      ? 'Shared tools (' + toolSelection.length + '): ' + toolSelection.join(', ') : 'No tools selected';
+  }
   function updateRunner(side) {
     const provider = $(comparisonKind === 'prompt' && side === 'b' ? 'a-provider' : side + '-provider').value;
     const openai = provider === 'openai';
@@ -127,7 +135,7 @@
     $('testBudget').textContent = repetitions * 2 + ($('comparisonMode').value === 'end-to-end' ? ' agent investigations; ' : ' generation requests; ') + repetitions * ($('checkOrder').checked ? 2 : 1) +
       ' review requests, plus up to ' + repetitions + ' citation corrections. ' +
       ($('comparisonMode').value === 'end-to-end'
-        ? 'Each generation is a full Datadog MCP investigation with as many model requests and tool calls as needed. Cancel to stop.'
+        ? 'Only tools freshly marked verified read-only are enabled. Every call requires confirmation. Cancel to stop.'
         : 'Sequential, frozen-evidence runs.');
   }
   function updateComparisonLayout() {
@@ -151,7 +159,7 @@
     $('historySave').textContent = prompt ? 'Save prompt comparison to History' : 'Save to history';
     $('incomingMessageLabel').textContent = prompt ? 'Shared input / alert' : 'Incoming message / trigger';
     $('evidenceOptionsLabel').textContent = prompt ? 'Shared evidence snapshot (optional; collected automatically)' : 'Source evidence (optional for live investigations)';
-    $('datadogBudgetGuidance').hidden = prompt;
+    $('agentGuidance').hidden = prompt;
     if ($('comparisonMode').options) $('comparisonMode').options[1].textContent = prompt
       ? 'Same evidence (collect once or reuse supplied snapshot)' : 'Model / prompt only (frozen evidence required)';
     $('sharedInstructions').hidden = prompt;
@@ -160,9 +168,9 @@
       : 'Compare models using the same instructions and incoming message.';
     $('investigationDescription').textContent = prompt
       ? $('comparisonMode').value === 'end-to-end'
-        ? 'Independent investigations: evidence may differ, so prompt effects are harder to isolate.'
-        : 'Shared evidence: collect one Datadog snapshot if blank, then give both prompts the exact same evidence without live tools.'
-      : 'End-to-end Orchestrate Test lets each model investigate independently with approved Datadog MCP tools. No pasted evidence is required.';
+        ? 'Independent read-only investigations: evidence may differ, so prompt effects are harder to isolate. Read-only declarations do not guarantee isolation.'
+        : 'Shared evidence: collect one snapshot using selected tools if blank, then give both prompts the exact same evidence without live tools.'
+      : 'End-to-end Orchestrate Test lets each model independently use your selected VS Code tools. Different evidence or shared-state changes prevent isolated model-quality attribution.';
     $('b-modelSettings').hidden = prompt;
     $('b-runner').hidden = prompt;
     $('b-modelDetails').hidden = prompt;
@@ -366,7 +374,7 @@
   function updateReviewProgress(phase, record = null) {
     reviewPhase = phase;
     if (!promptReviewRunning) return;
-    const titles = { prepare: 'Preparing prompt review', evidence: 'Collecting shared Datadog evidence',
+    const titles = { prepare: 'Preparing prompt review', evidence: 'Collecting shared tool evidence',
       original: 'Running original prompt', edited: 'Running edited prompt', review: 'Reviewing both outputs' };
     const pair = record?.pairs.at(-1);
     $('reviewProgressTitle').textContent = reviewCancelling ? 'Cancelling review...' : titles[phase];
@@ -411,7 +419,7 @@
     };
     tick();
     reviewClock = setInterval(tick, 1000);
-    $('reviewProgressDetail').textContent = 'Choose a model or approve Datadog access in VS Code if prompted. Neither prompt has run yet.';
+    $('reviewProgressDetail').textContent = 'Choose a model and tools or confirm a tool request in VS Code if prompted. Neither prompt has run yet.';
     updateReviewProgress('prepare');
   }
 
@@ -515,7 +523,7 @@
             ' | Retained evidence: ' + budget.evidenceCharacters + '/' + budget.limits.evidenceCharacters + ' characters', 'notice'));
           for (const reason of budget.reasons) audit.appendChild(make('p', reason, 'warning-callout'));
         }
-        if (pair[side].result?.toolEvidence) audit.append(make('h4', 'Datadog MCP requests and results'),
+        if (pair[side].result?.toolEvidence) audit.append(make('h4', 'Tool requests and results'),
           make('pre', JSON.stringify(pair[side].result.toolEvidence, null, 2), 'response-content'));
         if (pair[side].result?.provider === 'vscode') audit.appendChild(make('p', 'VS Code model-counted token estimates include all completed turns. ' +
           'Actual billed usage and hidden reasoning tokens are unavailable; instructions sent as user context.', 'notice'));
@@ -862,6 +870,16 @@
       if (comparisonKind === 'prompt') clearPromptOutputs(['a', 'b']);
       invalidate(); updateRunner(side); save();
     }
+    if (msg.type === 'toolsSelected') {
+      const changed = JSON.stringify(toolSelection) !== JSON.stringify(msg.names);
+      toolSelection = msg.names;
+      if (changed) {
+        if (evidenceCollection) { fill('evidence', ''); evidenceCollection = null; }
+        if (comparisonKind === 'prompt') clearPromptOutputs(['a', 'b']);
+        invalidate();
+      }
+      updateToolSummary(); save();
+    }
     if (msg.type === 'testFinished') {
       restore(msg.experiment);
       if (comparisonKind === 'prompt') revealHistoryResult = true;
@@ -971,6 +989,7 @@
     $('optimizerStatus').textContent = 'Draft applied to the edited prompt. Review the diff, then test it explicitly.';
   });
   $('loadInstructions').addEventListener('click', () => post('loadInstructions'));
+  $('selectTools').addEventListener('click', () => post('selectTools'));
   for (const side of ['a','b']) {
     $(side + '-loadInstructions').addEventListener('click', () => post('loadInstructions', { side }));
     $(side + '-selectModel').addEventListener('click', () => post('selectModel', { side }));
@@ -1000,6 +1019,7 @@
     if (comparisonKind === 'prompt') post('compare');
   }));
   restore(vscode.getState());
+  updateToolSummary();
   updateComparisonLayout();
   for (const side of ['a','b']) updateRunner(side);
   updateHistoryControls();

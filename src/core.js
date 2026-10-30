@@ -4,6 +4,7 @@ const { composeAgentTask, comparisonKind, createTestPlan, pairEvidence, validate
 const { validateUsageTurns, usageReport } = require('./usage');
 const { validatePromptChanges, promptDecision } = require('./prompt-review');
 const { responseContent } = require('./response');
+const { validateToolSelection } = require('./tool-agent');
 
 /**
  * Shared, dependency-free engine for the VS Code extension and CLI.
@@ -364,6 +365,7 @@ function evaluateChecks(a, b, checks = {}) {
 
 function compare(input) {
   if (!input || typeof input !== 'object') throw new TypeError('Experiment must be an object');
+  if (input.toolSelection !== undefined) validateToolSelection(input.toolSelection);
   if (input.kind === 'codemind-agent-run') throw new Error('Import single CodeMind runs into Baseline or Candidate before comparing a two-variant experiment.');
   const kind = comparisonKind(input);
   const baseline = describeVariant({ ...input.baseline, prompt: composeAgentTask(resolvePrompt(input.prompt, input.baseline?.prompt), input.incomingMessage) });
@@ -377,8 +379,12 @@ function compare(input) {
   let evidence = String(input.evidence || '');
   if (testRun) {
     try {
-      if (createTestPlan(input, { legacyBudget: testRun.plan.comparisonMode === 'end-to-end' &&
-          testRun.plan.investigationMode === undefined }).inputFingerprint !== testRun.plan.inputFingerprint) testRun = null;
+      if (createTestPlan({ ...input, toolCatalog: testRun.plan.toolCatalog }, {
+        legacyBudget: testRun.plan.comparisonMode === 'end-to-end' && testRun.plan.investigationMode === undefined,
+        legacyDatadog: testRun.plan.instructionsVersion === undefined,
+        legacyTools: testRun.plan.toolPolicy === 'confirm-every-request' }).inputFingerprint !== testRun.plan.inputFingerprint ||
+          input.toolSelection && testRun.plan.toolCatalog &&
+          JSON.stringify(input.toolSelection) !== JSON.stringify(testRun.plan.toolCatalog.map(tool => tool.name))) testRun = null;
     }
     catch { testRun = null; }
     if (testRun) {
@@ -462,7 +468,7 @@ function asMarkdown(result) {
           budget.evidenceCharacters + '/' + budget.limits.evidenceCharacters + ' retained evidence characters.');
       }
     }
-    lines.push('', '<details><summary>' + (test.plan.comparisonMode === 'end-to-end' ? 'Task, Datadog results and complete test record' : 'Frozen inputs and complete test record') +
+    lines.push('', '<details><summary>' + (test.plan.comparisonMode === 'end-to-end' ? 'Task, tool results and complete test record' : 'Frozen inputs and complete test record') +
       ' (includes responses and citations)</summary>', '',
       fencedText(JSON.stringify(test, null, 2)), '', '</details>', '');
   }

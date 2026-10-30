@@ -113,7 +113,7 @@ async function resolveRunModels(vscode, variants, { requireTools = false } = {})
     assertCallableModel(model, 'The ' + side);
     if (requireTools && (model.capabilities?.supportsToolCalling === false || model.capabilities?.toolCalling === false ||
         model.capabilities?.toolCalling === 0)) {
-      throw new Error('The ' + side + ' model does not support tool calling. Use Select model to choose a tool-capable chat model for Datadog investigations.');
+      throw new Error('The ' + side + ' model does not support tool calling. Use Select model to choose a tool-capable chat model for tool-enabled runs.');
     }
     selected[side] = model;
   }
