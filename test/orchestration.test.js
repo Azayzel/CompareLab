@@ -1,8 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { composeAgentTask, createTestPlan, pairEvidence, orchestrateTest, summarizeTest, validateTestRecord } = require('../src/orchestration');
-const { compare } = require('../src/core');
-const { codeMindAlert } = require('../src/inputs');
+const { composeAgentTask, createTestPlan, pairEvidence, orchestrateTest, summarizeTest, validateTestRecord } = require('../src/comparison/orchestration');
+const { compare } = require('../src/comparison/core');
+const { codeMindAlert } = require('../src/comparison/inputs');
 
 const experiment = () => ({ prompt: 'Diagnose the failed requests.', evidence: 'HTTP 401 increased; no deployment occurred.',
   baseline: { provider: 'ollama', model: 'baseline-model', response: 'Old response', executionTrace: { stale: true } },
@@ -284,7 +284,7 @@ test('full-agent records retain more than eight queries and 50,000 evidence char
 });
 
 test('historical budget-limited records keep their original fingerprints, warnings, and evidence on reopen', async () => {
-  const { LEGACY_LIMITS } = require('../src/legacy-datadog');
+  const { LEGACY_LIMITS } = require('../src/records/legacy-datadog');
   const input = { ...experiment(), comparisonMode: 'end-to-end', evidence: '', test: { repetitions: 1 } };
   const runner = runners();
   runner.runVariant = async input => ({ ...input, response: 'Limited answer.', toolEvidence: [{

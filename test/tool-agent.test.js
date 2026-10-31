@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { selectTools, resolveTools, verifyReadOnlyTools, toolCatalog, runToolAgent: runVerifiedAgent, AGENT_PROMPT } = require('../src/tool-agent');
+const { selectTools, resolveTools, verifyReadOnlyTools, toolCatalog, runToolAgent: runVerifiedAgent, AGENT_PROMPT } = require('../src/tools/agent');
 
 async function runToolAgent(vscode, input, tools, ...args) {
   const verified = await verifyReadOnlyTools(vscode, tools);
@@ -147,8 +147,8 @@ test('does not accept fabricated model evidence or invoke unapproved tools', asy
 });
 
 test('candidate usage and activity exclude baseline and evaluator activity across paired runs', async () => {
-  const { orchestrateTest, summarizeTest } = require('../src/orchestration');
-  const { compare } = require('../src/core');
+  const { orchestrateTest, summarizeTest } = require('../src/comparison/orchestration');
+  const { compare } = require('../src/comparison/core');
   const vscode = api();
   const record = await orchestrateTest({
     prompt: 'Investigate the example service', comparisonMode: 'end-to-end', test: { repetitions: 2 },

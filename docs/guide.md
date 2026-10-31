@@ -140,7 +140,7 @@ The analysis cards also show **average input/output tokens per successful run**,
 
 Each newly completed model request retains its input/output token counts, including intermediate tool-calling turns. Cost estimates are not shown as prominent model-card metrics; expand **Per-turn costs and pricing assumptions** to see the total and request-by-request breakdown, in both the panel and HTML report. Investigation totals and evaluator requests (including citation corrections) are separate. JSON/history preserve the per-turn counts; HTML and Markdown reports include the estimates. Older records without per-turn counts remain explicitly unknown; CompareLab does not invent a breakdown from their totals.
 
-- **Basis:** USD, Azure OpenAI Global Standard pay-as-you-go text-token rates. The bundled offline snapshot in [src/azure-prices.js](../src/azure-prices.js) was checked on **2026-10-28** against the [Azure Retail Prices API](https://prices.azure.com/api/retail/prices) using public East US Global meters. The research covered all pages of that region's Azure OpenAI Consumption meters; 21 exact model IDs have verified text input/output rates in the snapshot. No Azure credentials or network calls are required at runtime.
+- **Basis:** USD, Azure OpenAI Global Standard pay-as-you-go text-token rates. The bundled offline snapshot in [src/metrics/azure-prices.js](../src/metrics/azure-prices.js) was checked on **2026-10-28** against the [Azure Retail Prices API](https://prices.azure.com/api/retail/prices) using public East US Global meters. The research covered all pages of that region's Azure OpenAI Consumption meters; 21 exact model IDs have verified text input/output rates in the snapshot. No Azure credentials or network calls are required at runtime.
 - **Formula per request:** `(input tokens * input USD per million + output tokens * output USD per million) / 1,000,000`. Actual provider counts take precedence over model-counted estimates. Do not divide a cumulative investigation total by turns to reconstruct request costs.
 - **Context pricing:** Some models have separate short- and long-context meters. Where the model-specific cutoff could not be verified, both scenarios are displayed, rather than assuming a tier from the total investigation size. These are conditional pricing scenarios, **not upper/lower bounds on your bill**. [Microsoft's model documentation](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure) says the category depends on input tokens in an individual request, not the model's maximum context window or cumulative investigation total.
 - **Verified examples, USD per million input/output tokens:** `gpt-5.6-luna`: **$0.20 / $1.20 short**, **$0.40 / $1.80 long**; `gpt-6.1-sol`: **$2 / $10 short**, **$4 / $15 long**. See [official Azure pricing](https://azure.microsoft.com/en-us/pricing/details/azure-openai/) for deployment options and current rates.
@@ -353,14 +353,18 @@ Optional top-level `evidence` contains the source snapshot and `review.checkOrde
 
 | Path | Purpose |
 | --- | --- |
-| `src/core.js` | Review rubric and validation, readable responses, text diff, checks, Markdown reports |
-| `src/copilot.js` | Copilot model selection, two-order assessment, cancellation, chat draft handoff |
-| `src/providers.js` | Native Ollama and OpenAI-compatible HTTP adapters |
-| `src/orchestration.js` | Frozen-input plans, bounded paired runs, measurements and test records |
-| `src/inputs.js` | CodeMind incoming-alert normalization and model-facing agent instructions |
-| `src/extension.js`, `media/` | VS Code Webview, file handling and minimal UI |
+| `src/comparison/` | Comparison engine, review rubric, prompt workflows, input normalization, and orchestration |
+| `src/providers/vscode/` | Model discovery, generation, evaluation, and Chat handoff |
+| `src/providers/http.js` | Native Ollama and OpenAI-compatible HTTP adapters |
+| `src/tools/` | Tool selection, read-only verification, and confirmed investigations |
+| `src/metrics/` | Token accounting, efficiency summaries, and offline price estimates |
+| `src/records/` | History, execution-trace imports, and legacy-record compatibility |
+| `src/reporting/` | Standalone HTML reports |
+| `src/extension.js`, `src/webview/`, `media/` | VS Code host, editor-panel markup, and browser UI |
 | `bin/comparelab.js` | CLI over prepared responses |
 | `test/` | Built-in Node tests, mocked provider/Copilot calls and VS Code host behavior |
+
+See [module ownership and dependency rules](../CONTRIBUTING.md#code-boundaries) before adding source files.
 
 - [DECISIONS.md](../DECISIONS.md) — architecture and tradeoffs.
 - [SKILL.md](../SKILL.md) — repeatable comparison procedure.

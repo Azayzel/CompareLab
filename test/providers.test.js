@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { runModel, normalizedEndpoint } = require('../src/providers');
+const { runModel, normalizedEndpoint } = require('../src/providers/http');
 
 function response(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });

@@ -3,9 +3,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { asHtml } = require('../src/html');
-const { compare } = require('../src/core');
-const { orchestrateTest } = require('../src/orchestration');
+const { asHtml } = require('../src/reporting/html');
+const { compare } = require('../src/comparison/core');
+const { orchestrateTest } = require('../src/comparison/orchestration');
 
 const assets = {
   css: ['style.css', 'runners.css'].map(file => fs.readFileSync(path.join(__dirname, '../media', file), 'utf8')).join('\n'),

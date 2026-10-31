@@ -1,0 +1,6 @@
+'use strict';
+
+const MAX_PROMPT_CHARACTERS = 150000;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+module.exports = { MAX_PROMPT_CHARACTERS, MAX_RESPONSE_BYTES };

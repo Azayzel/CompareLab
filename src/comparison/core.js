@@ -1,10 +1,10 @@
 'use strict';
-const { validateTrace, summarizeTrace, traceDifferences } = require('./traces');
+const { validateTrace, summarizeTrace, traceDifferences } = require('../records/traces');
 const { composeAgentTask, comparisonKind, createTestPlan, pairEvidence, validateTestRecord, summarizeTest } = require('./orchestration');
-const { validateUsageTurns, usageReport } = require('./usage');
+const { validateUsageTurns, usageReport } = require('../metrics/usage');
 const { validatePromptChanges, promptDecision } = require('./prompt-review');
 const { responseContent } = require('./response');
-const { validateToolSelection } = require('./tool-agent');
+const { validateToolSelection } = require('../tools/agent');
 
 /**
  * Shared, dependency-free engine for the VS Code extension and CLI.
