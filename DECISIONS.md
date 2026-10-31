@@ -49,4 +49,4 @@ API keys are entered in VS Code and stored in SecretStorage, not in experiment J
 
 The review prompt marks all supplied content as untrusted data. This is not a complete prompt-injection defense. In-panel evaluation exposes no tools; the separate Agent-mode draft requests read-only investigation but does not enforce tool permissions. Model identities can remain inside supplied prose despite anonymized labels.
 
-**Open issues:** live provider/Copilot/editor smoke tests, controlled multi-run experiments, judge calibration and additional provider interfaces. For details, see [PLAN.md](PLAN.md), [SECURITY.md](SECURITY.md), and [SHELVED.md](SHELVED.md).
+**Open issues:** live provider/Copilot/editor smoke tests, controlled multi-run experiments, judge calibration and additional provider interfaces. 

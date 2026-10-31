@@ -3,20 +3,33 @@
   "displayName": "CompareLab",
   "description": "Compare AI models and prompt variants in VS Code with inline diffs, controlled evaluations, and local-first Ollama/OpenAI-compatible runners.",
   "version": "0.2.0",
-  "publisher": "azayzel",
-  "private": true,
+  "publisher": "Josh Lavely",
+  "private": false,
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/Azayzel/CompareLab.git"
   },
-  "engines": { "vscode": "^1.90.0", "node": ">=20" },
+  "engines": {
+    "vscode": "^1.90.0",
+    "node": ">=20"
+  },
   "main": "./src/extension.js",
   "type": "commonjs",
-  "categories": ["Other", "Machine Learning"],
-  "activationEvents": ["onCommand:comparelab.open"],
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "activationEvents": [
+    "onCommand:comparelab.open"
+  ],
   "contributes": {
-    "commands": [{ "command": "comparelab.open", "title": "CompareLab: Compare Model Outputs" }]
+    "commands": [
+      {
+        "command": "comparelab.open",
+        "title": "CompareLab: Compare Model Outputs"
+      }
+    ]
   },
   "scripts": {
     "test": "node --test",
