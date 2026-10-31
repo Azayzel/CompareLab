@@ -1,12 +1,14 @@
 # Security
 
-CompareLab is a local-first VS Code extension. Manual comparisons and the CLI work without model-network calls. **Run / Run both** send prompts to the selected provider endpoint. **Evaluate with Copilot** sends supplied tasks, evidence, and responses through VS Code's Language Model API after model selection and any required consent. **Analyze in Copilot Chat** opens an unsent draft; review it before sending. Provider and Copilot policies, usage charges, and retention rules apply.
+CompareLab is a local-first VS Code extension. Manual comparisons and the CLI work without model-network calls. Generation-only actions send prompts to the selected provider without tools. Under **Other actions**, **Review existing responses** sends supplied tasks, evidence, and responses through VS Code's Language Model API after model selection and any required consent. **Open review in Chat** opens an unsent draft; review it before sending. Provider and Copilot policies, usage charges, and retention rules apply.
 
 ## Credentials
 
-**Orchestrate Test** explicitly authorizes a bounded batch of provider generations plus Copilot reviews. The panel previews request counts; citation corrections may add one review request per pair. Both providers receive the same supplied instructions, trigger and evidence. No Kafka subscription, production remediation, or live tool investigation is performed.
+**Run comparison** starts paired generations and Copilot reviews using the selected comparison mode. The panel previews paired-run and review counts; **Advanced settings** contains the detailed request summary. Citation corrections may add one review request per pair. Frozen-evidence runs share the supplied evidence. End-to-end runs let each model investigate independently using the same selected tools; their evidence and request counts can differ.
 
-VS Code models are discovered through the editor's Language Model API and use the user's existing provider access, consent and policy. CompareLab does not read those credentials. Inputs are sent only by explicit Run/Orchestrate actions. This integration supplies no tools or privileged system messages; provider controls and actual usage are not inferred from token estimates.
+Live runs and shared-evidence collection require fresh verification of read-only tools and confirmation for every invocation. Writes, commands, code execution, and shared-state changes are prohibited. Verification is a user declaration, not a sandbox or proof of provider behavior; use trusted providers and read-only server permissions. See [tool selection and safety](docs/guide.md#selecting-vs-code-tools).
+
+VS Code models are discovered through the editor's Language Model API and use the user's existing provider access, consent and policy. CompareLab does not read those credentials. Generation and review require explicit user actions. VS Code models receive instructions as user context, not privileged system messages; provider controls and actual usage are not inferred from token estimates.
 
 - OpenAI-compatible bearer keys are captured through a masked VS Code input and stored in **SecretStorage**, scoped to the normalized endpoint.
 - Keys are not included in Webview experiment state, JSON exports, Markdown reports, or code.
@@ -15,8 +17,9 @@ VS Code models are discovered through the editor's Language Model API and use th
 
 ## Data handling
 
-- The extension keeps the working experiment in VS Code Webview state; exported JSON/Markdown may contain full prompts, source evidence, model responses and configuration. Markdown can also contain evaluator judgments and citations; assessments are otherwise held in memory, not restored from JSON.
+- The extension keeps the working experiment in VS Code Webview state. JSON, Markdown, and HTML exports can contain full prompts, source evidence, model responses, and configuration. Markdown/HTML reports can include evaluator judgments and citations; standalone assessments are not included in ordinary experiment JSON.
 - Orchestrated tests also retain original agent text, raw/normalized triggers, exact model-facing requests, all retained pair outputs and judgments, timestamps and metrics in JSON and Markdown. Records are capped at 8 MiB and are not cryptographically authenticated. Review before sharing; input normalization and template insertion do not redact sensitive content.
+- Local history retains saved experiments and reviews as unencrypted JSON outside the repository. It is shared across workspaces in the same VS Code profile, not synced by CompareLab. Restoring a record does not run models or grant tool permissions.
 - **Load agent file** reads only the selected local text file (up to 150,000 characters). It does not execute the file, follow skill links, or grant tools named in frontmatter.
 - No CompareLab-owned hosted backend, user account or telemetry service is included.
 - The UI uses `textContent` for dynamic response text and a Webview Content Security Policy.
@@ -29,11 +32,20 @@ VS Code models are discovered through the editor's Language Model API and use th
 
 - Remote requests require HTTPS; localhost/loopback HTTP is allowed.
 - Credentials in URLs, URL query strings/fragments, and HTTP redirects are rejected.
-- Requests have a **180-second timeout** and response bodies are limited to **2 MiB**.
-- Copilot reviews enforce a 150,000-character packet limit, estimated input-token capacity, a 180-second evaluation timeout, and 2 MiB per streamed response. Reversed-order checking runs two reviews by default, with at most one extra citation correction request across both orders. All attempts use the same limits, cancellation token, and source packet for that order. Request counts include corrections; actual token usage/cost are not exposed by this API.
+- HTTP provider requests and VS Code generation requests have a **180-second timeout** and a **2 MiB** response limit. These per-request limits are not an overall investigation budget or a limit on retained tool-result text.
+- Direct Copilot reviews count complete request messages against the selected model's reported input-token limit, without a fixed character cap or silent evidence truncation. They retain a 180-second evaluation timeout and a 2 MiB streamed-response limit. Reversed-order checking runs two reviews by default, with at most one extra citation correction request across both orders. Request counts include corrections; token counts are estimates, not billed usage.
+- The separate **Open review in Chat** draft retains its 150,000-character limit because CompareLab cannot inspect the eventual Chat model. Review the draft before submitting it.
 - These constraints are not a complete defense against malicious local services, DNS rebinding, compromised TLS, or untrusted providers. Only configure endpoints you trust.
 - Automated tests use mocks; no live security audit or production-provider certification has been completed.
 
 ## Vulnerability reporting
 
 Avoid posting security details or sensitive data to public issues. Use the repository's **Report a vulnerability** private advisory feature when available, or an established private maintainer contact channel. Include reproduction steps and sanitized evidence.
+
+## Release publishing
+
+- Releases run only on pushes to `main`, not pull requests. Build and tests must pass before tagging or publishing.
+- The publishing job requests GitHub release/tag write access and an OIDC token. Configure the **marketplace** environment to accept only `main`, and bind the Marketplace trusted-publishing policy to this repository, workflow, and environment.
+- No long-lived Marketplace PAT is stored in the repository. Protect merges and changes to the release workflow; OIDC authenticates the workflow, not the safety of the source being published.
+- Draft releases retain the packaged VSIX for recovery. Reruns reuse that artifact and validate its extension identity and version before publishing; they do not overwrite an existing release asset.
+- Packaging dependencies are development-only and locked. They are excluded from the VSIX.

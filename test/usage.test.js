@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { usageTurn, validateUsageTurns, estimateTurn, usageReport, activity, efficiencyMetrics } = require('../src/usage');
-const prices = require('../src/azure-prices');
+const { usageTurn, validateUsageTurns, estimateTurn, usageReport, activity, efficiencyMetrics } = require('../src/metrics/usage');
+const prices = require('../src/metrics/azure-prices');
 
 test('verified Azure meters use USD per million, including normalized 1K meters', () => {
   assert.equal(Object.keys(prices.models).length, 21);

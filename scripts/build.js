@@ -14,7 +14,8 @@ function javascriptFiles(directory) {
   });
 }
 
-for (const file of [manifest.main, 'README.md', 'LICENSE', 'media/app.js', 'media/markdown.js', 'media/style.css', 'media/runners.css']) {
+const icons = manifest.contributes.viewsContainers.activitybar.map(container => container.icon);
+for (const file of [manifest.main, manifest.icon, ...icons, 'README.md', 'LICENSE', 'media/app.js', 'media/markdown.js', 'media/style.css', 'media/runners.css']) {
   if (!fs.statSync(path.join(root, file)).isFile()) throw new Error('Required extension file is missing: ' + file);
 }
 

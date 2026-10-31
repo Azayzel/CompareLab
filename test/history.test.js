@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { createHistory, HISTORY_LIMITS } = require('../src/history');
+const { createHistory, HISTORY_LIMITS } = require('../src/records/history');
 
 const comparison = title => ({ prompt: title, baseline: { model: 'baseline', response: 'First response' },
   candidate: { model: 'candidate', response: 'Second response' } });

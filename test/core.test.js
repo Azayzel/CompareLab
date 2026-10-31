@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { compare, diffText, asMarkdown, responseContent, reviewPacket, parseAssessment, CitationValidationError, REVIEW_CRITERIA } = require('../src/core');
+const { compare, diffText, asMarkdown, responseContent, reviewPacket, parseAssessment, CitationValidationError, REVIEW_CRITERIA } = require('../src/comparison/core');
 
 test('identical text is unchanged', () => {
   assert.deepEqual(diffText('hello world', 'hello world'), [{ type: 'equal', text: 'hello world' }]);

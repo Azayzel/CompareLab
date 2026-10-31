@@ -1,8 +1,8 @@
 'use strict';
 const { randomBytes } = require('node:crypto');
-const { responseContent } = require('./core');
-const { usageReport } = require('./usage');
-const { promptDecision } = require('./prompt-review');
+const { responseContent } = require('../comparison/response');
+const { usageReport } = require('../metrics/usage');
+const { promptDecision } = require('../comparison/prompt-review');
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, character =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -72,7 +72,7 @@ function asHtml(result, { css, markdownScript }) {
     <span class="status-badge">${escape(status)}</span></span></div><p class="model-role">${label(side)}${result.comparisonKind === 'prompt' ? ' prompt' : ''}</p>
     ${tokens(value)}<div class="response-view">${value?.response ? formatted(value.response) : `<p class="warning-callout">${escape(error || 'No response available.')}</p>`}</div>
     ${value?.response ? details('Raw response', raw(value.response)) : ''}
-    ${value?.toolEvidence ? details('Datadog requests and full returned results', raw(JSON.stringify(value.toolEvidence, null, 2))) : ''}
+    ${value?.toolEvidence ? details('Tool requests and full returned results', raw(JSON.stringify(value.toolEvidence, null, 2))) : ''}
     ${value?.investigationBudget?.limited ? `<p class="warning-callout">Historical budget-limited investigation: ${escape(value.investigationBudget.reasons.join(' '))}</p>` : ''}
     </article>`;
   const test = result.testRun;

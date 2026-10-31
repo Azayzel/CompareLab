@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: comparelab-release
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: marketplace
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Select or resume release version
+        id: version
+        run: node scripts/release-version.js
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Install pinned packaging tools
+        if: steps.version.outputs.released != 'true'
+        run: npm ci --ignore-scripts
+      - name: Set the artifact version
+        if: steps.version.outputs.released != 'true'
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+      - name: Validate, test, and package
+        if: steps.version.outputs.released != 'true'
+        run: npm run package
+      - name: Reserve immutable release tag
+        if: steps.version.outputs.released != 'true' && steps.version.outputs.tag_exists != 'true'
+        run: gh api "repos/$GITHUB_REPOSITORY/git/refs" --method POST -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$GITHUB_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+      - name: Create draft release
+        if: steps.version.outputs.released != 'true' && steps.version.outputs.release_exists != 'true'
+        run: gh release create "$RELEASE_TAG" --verify-tag --draft --title "CompareLab $RELEASE_TAG" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+      - name: Retain or recover the release artifact
+        if: steps.version.outputs.released != 'true'
+        run: |
+          if [ "$ASSET_EXISTS" = "true" ]; then
+            gh release download "$RELEASE_TAG" --pattern comparelab.vsix --dir dist --clobber
+          else
+            gh release upload "$RELEASE_TAG" dist/comparelab.vsix
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          ASSET_EXISTS: ${{ steps.version.outputs.asset_exists }}
+      - name: Publish VSIX to Marketplace using trusted publishing
+        if: steps.version.outputs.released != 'true'
+        run: |
+          unzip -p dist/comparelab.vsix extension/package.json |
+            node -e 'const fs = require("node:fs"); const assert = require("node:assert/strict"); const manifest = JSON.parse(fs.readFileSync(0, "utf8")); assert.equal(manifest.version, process.env.RELEASE_VERSION); assert.equal(manifest.publisher, "azayzel"); assert.equal(manifest.name, "comparelab");'
+          if [ "$RESUMING" = "true" ]; then
+            echo "Resuming the saved artifact; an already-published version is accepted."
+            npm exec -- vsce publish --packagePath dist/comparelab.vsix --oidc --skip-duplicate
+          else
+            npm exec -- vsce publish --packagePath dist/comparelab.vsix --oidc
+          fi
+        env:
+          RESUMING: ${{ steps.version.outputs.release_exists }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+      - name: Publish GitHub release
+        if: steps.version.outputs.released != 'true'
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}

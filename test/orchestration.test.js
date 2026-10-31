@@ -1,8 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { composeAgentTask, createTestPlan, pairEvidence, orchestrateTest, summarizeTest, validateTestRecord } = require('../src/orchestration');
-const { compare } = require('../src/core');
-const { codeMindAlert } = require('../src/inputs');
+const { composeAgentTask, createTestPlan, pairEvidence, orchestrateTest, summarizeTest, validateTestRecord } = require('../src/comparison/orchestration');
+const { compare } = require('../src/comparison/core');
+const { codeMindAlert } = require('../src/comparison/inputs');
 
 const experiment = () => ({ prompt: 'Diagnose the failed requests.', evidence: 'HTTP 401 increased; no deployment occurred.',
   baseline: { provider: 'ollama', model: 'baseline-model', response: 'Old response', executionTrace: { stale: true } },
@@ -41,17 +41,36 @@ test('end-to-end plans do not require evidence and do not claim live tools are u
   assert.equal(plan.comparisonMode, 'end-to-end');
   assert.equal(plan.investigationMode, 'full-agent');
   assert.equal(plan.evidence, '');
-  assert.match(plan.requestPrompt, /approved Datadog MCP tools/);
-  assert.match(plan.requestPrompt, /targeted list_datadog_skills query/);
-  assert.match(plan.requestPrompt, /required telemetry/);
+  assert.match(plan.requestPrompt, /selected VS Code tools/);
+  assert.match(plan.requestPrompt, /Every invocation requires user confirmation/);
+  assert.equal(plan.toolPolicy, 'verified-read-only-confirm-every-request');
+  assert.match(plan.requestPrompt, /Never modify systems.*User confirmation does not override/);
+  assert.match(plan.requestPrompt, /exposed tool schemas/);
+  assert.doesNotMatch(plan.requestPrompt, /datadog/i);
   assert.doesNotMatch(plan.requestPrompt, /No live tools are available/);
   assert.doesNotMatch(plan.requestPrompt, /at most 8|reserve the final request/);
   assert.throws(() => createTestPlan({ ...input, comparisonMode: 'model-prompt-only' }), /requires Source evidence/);
   const alertPlan = createTestPlan({ ...input, incomingMessage: '{"eventId":"123","monitorId":"456"}' });
-  assert.match(alertPlan.systemPrompt, /approved Datadog MCP tools/);
+  assert.match(alertPlan.systemPrompt, /selected VS Code tools/);
   assert.match(alertPlan.requestPrompt, /Supplied reference evidence/);
 });
 
+test('older arbitrary-tool records reopen unchanged but reruns use the new read-only policy', async () => {
+  const input = { ...experiment(), comparisonMode: 'end-to-end', test: { repetitions: 1 } };
+  const runner = runners();
+  runner.runVariant = async request => ({ ...request, response: 'Historical answer', toolEvidence: [{
+    tool: 'arbitrary_tool', input: {}, content: 'Historical result', collectedAt: new Date().toISOString()
+  }] });
+  const record = await orchestrateTest(input, runner);
+  record.plan = createTestPlan(input, { legacyTools: true });
+  for (const side of ['baseline', 'candidate']) record.pairs[0][side].result.prompt = record.plan.requestPrompt;
+  assert.equal(record.plan.toolPolicy, 'confirm-every-request');
+  assert.deepEqual(validateTestRecord(record), record);
+  assert.ok(compare({ ...input, testRun: record,
+    baseline: { ...record.plan.baseline, response: 'Historical answer' },
+    candidate: { ...record.plan.candidate, response: 'Historical answer' } }).testRun);
+  assert.equal(createTestPlan(input).toolPolicy, 'verified-read-only-confirm-every-request');
+});
 test('end-to-end results require real tool evidence before review and validate on import', async () => {
   const input = { ...experiment(), comparisonMode: 'end-to-end', evidence: '', test: { repetitions: 1 } };
   const runner = runners();
@@ -59,7 +78,7 @@ test('end-to-end results require real tool evidence before review and validate o
   const failed = await orchestrateTest(input, runner);
   assert.equal(failed.status, 'partial');
   assert.equal(runner.reviews.length, 0);
-  assert.match(failed.pairs[0].baseline.error, /valid Datadog MCP evidence/);
+  assert.match(failed.pairs[0].baseline.error, /valid tool evidence/);
   runner.runVariant = async (input, side) => ({ ...await generate(input, side),
     toolEvidence: [{ tool: 'datadog-search_logs', input: { query: side }, collectedAt: new Date().toISOString(), content: side + ' logs' }] });
   const record = await orchestrateTest(input, runner);
@@ -88,10 +107,10 @@ test('end-to-end results require real tool evidence before review and validate o
     collectedAt: new Date().toISOString(), content: 'GUIDANCE_ONLY: use valid query syntax' };
   record.pairs[0].baseline.result.toolEvidence.unshift(guide);
   assert.deepEqual(validateTestRecord(record), record);
-  assert.doesNotMatch(pairEvidence(record.plan, record.pairs[0]), /GUIDANCE_ONLY/);
+  assert.match(pairEvidence(record.plan, record.pairs[0]), /GUIDANCE_ONLY/);
   assert.match(pairEvidence(record.plan, record.pairs[0]), /baseline logs/);
   tampered.pairs[0].baseline.result.toolEvidence = [guide];
-  assert.throws(() => validateTestRecord(tampered), /Invalid controlled-test record/);
+  assert.deepEqual(validateTestRecord(tampered), tampered);
   record.pairs[0].baseline.result.toolEvidence[1].tool = 'mcp_observability_aggregate_spans';
   assert.deepEqual(validateTestRecord(record), record);
 });
@@ -210,7 +229,7 @@ test('CodeMind mapped alerts follow the normalized agent-input contract and sepa
   assert.equal(record.plan.normalizedAlert.service, 'orders');
   assert.match(record.plan.systemPrompt, /^Investigate \{\{alert\}\}\./);
   assert.doesNotMatch(record.plan.systemPrompt, /name: Example Agent/);
-  assert.match(record.plan.requestPrompt, /^Analyze this Datadog alert event:/);
+  assert.match(record.plan.requestPrompt, /^Analyze this alert event:/);
   assert.doesNotMatch(record.plan.requestPrompt, /rawEventRef|sendAlert/);
   assert.deepEqual(validateTestRecord(record), record);
   const normalized = codeMindAlert(JSON.stringify(record.plan.normalizedAlert));
@@ -265,7 +284,7 @@ test('full-agent records retain more than eight queries and 50,000 evidence char
 });
 
 test('historical budget-limited records keep their original fingerprints, warnings, and evidence on reopen', async () => {
-  const { DATADOG_LIMITS } = require('../src/datadog');
+  const { LEGACY_LIMITS } = require('../src/records/legacy-datadog');
   const input = { ...experiment(), comparisonMode: 'end-to-end', evidence: '', test: { repetitions: 1 } };
   const runner = runners();
   runner.runVariant = async input => ({ ...input, response: 'Limited answer.', toolEvidence: [{
@@ -278,7 +297,7 @@ test('historical budget-limited records keep their original fingerprints, warnin
   for (const side of ['baseline', 'candidate']) {
     const result = record.pairs[0][side].result;
     result.prompt = record.plan.requestPrompt;
-    result.investigationBudget = { limits: DATADOG_LIMITS, modelRequests: 2, toolCalls: 1, skippedToolCalls: 0,
+    result.investigationBudget = { limits: LEGACY_LIMITS, modelRequests: 2, toolCalls: 1, skippedToolCalls: 0,
       evidenceCharacters: JSON.stringify(result.toolEvidence).length, limited: true, reasons: ['Tool result was truncated.'] };
   }
   assert.deepEqual(validateTestRecord(record), record);
@@ -303,6 +322,44 @@ test('historical budget-limited records keep their original fingerprints, warnin
   }
 });
 
+test('historical full-agent and frozen CodeMind records reconstruct the original vendor-specific request', async () => {
+  for (const comparisonMode of ['end-to-end', 'model-prompt-only']) {
+    const input = { ...experiment(), incomingMessage: '{"eventId":"legacy-event"}', comparisonMode, test: { repetitions: 1 } };
+    const runner = runners();
+    runner.runVariant = async request => ({ ...request, response: 'Historical answer', toolEvidence: [{
+      tool: 'datadog-search_datadog_logs', input: {}, content: 'Historical observations', collectedAt: new Date().toISOString()
+    }] });
+    const record = await orchestrateTest(input, runner);
+    record.plan = createTestPlan(input, { legacyDatadog: true });
+    assert.match(record.plan.requestPrompt, /^Analyze this Datadog alert event:/);
+    for (const side of ['baseline', 'candidate']) {
+      record.pairs[0][side].result.prompt = record.plan.requestPrompt;
+      record.pairs[0][side].result.systemPrompt = record.plan.systemPrompt;
+    }
+    assert.deepEqual(validateTestRecord(record), record);
+    assert.ok(compare({ ...input, testRun: record,
+      baseline: { ...record.plan.baseline, response: 'Historical answer' },
+      candidate: { ...record.plan.candidate, response: 'Historical answer' } }).testRun);
+  }
+});
+
+test('recorded catalogs reject calls outside the shared selection and altered definitions', async () => {
+  const catalog = [{ name: 'mcp_read', description: 'Read', inputSchema: { type: 'object' }, tags: ['mcp'] }];
+  const input = { ...experiment(), comparisonMode: 'end-to-end', toolCatalog: catalog, test: { repetitions: 1 } };
+  const runner = runners();
+  runner.runVariant = async request => ({ ...request, response: 'Answer', toolCatalog: catalog, toolEvidence: [{
+    tool: 'mcp_read', input: {}, content: 'Observed facts', collectedAt: new Date().toISOString()
+  }] });
+  const record = await orchestrateTest(input, runner);
+  assert.equal(record.status, 'completed');
+  assert.deepEqual(validateTestRecord(record), record);
+  const changed = structuredClone(record);
+  changed.pairs[0].baseline.result.toolCatalog[0].description = 'Altered';
+  assert.throws(() => validateTestRecord(changed), /Invalid controlled-test record/);
+  changed.pairs[0].baseline.result.toolCatalog = catalog;
+  changed.pairs[0].baseline.result.toolEvidence[0].tool = 'unselected';
+  assert.throws(() => validateTestRecord(changed), /Invalid controlled-test record/);
+});
 test('prompt tests hold model settings fixed, send each exact prompt, and retain correct review tasks through import', async () => {
   const input = { prompt: '', incomingMessage: 'Alert 123', evidence: 'HTTP 401 increased.', comparisonKind: 'prompt',
     test: { repetitions: 2 }, baseline: { provider: 'ollama', model: 'shared-model', prompt: 'Investigate {{alert}}.' },
@@ -352,7 +409,7 @@ test('prompt-specific agent instructions remain separate system messages for nor
   const record = await orchestrateTest(input, { ...runners(), runVariant: async (request, side) => {
     requests.push(request);
     assert.match(request.systemPrompt, side === 'baseline' ? /^Baseline agent instructions/ : /^Candidate agent instructions/);
-    assert.match(request.prompt, /^Analyze this Datadog alert event:/);
+    assert.match(request.prompt, /^Analyze this alert event:/);
     return { ...request, response: side + ' answer', toolEvidence: [{
       tool: 'datadog-search_datadog_logs', input: { query: side }, content: 'HTTP 401', collectedAt: new Date().toISOString()
     }] };
