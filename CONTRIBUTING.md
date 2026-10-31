@@ -23,7 +23,7 @@ npm run package
 
 This invokes the standard `@vscode/vsce` packager through `npx`. Its `vscode:prepublish` hook runs the build and tests before packaging, and the output is `dist/comparelab.vsix`. The packager requires approved npm registry access and a Node version supported by the resolved tool version; its version is not pinned. The extension itself retains its Node.js 20+ requirement. No Marketplace publishing or credentials are needed for local packaging.
 
-The `.vscodeignore` allowlist includes only the manifest, README, license, runtime source, and webview assets. Keep this list in sync when adding runtime files outside `src/` or `media/`. Tests, examples, local exports, editor configuration, and generated packages must not enter the VSIX. See [Build and package](README.md#build-and-package) for installation and registry-access troubleshooting.
+The `.vscodeignore` allowlist includes only the manifest, README, license, runtime source, and webview assets. Keep this list in sync when adding runtime files outside `src/` or `media/`. Tests, examples, local exports, editor configuration, and generated packages must not enter the VSIX. See [Build and package](docs/guide.md#build-and-package) for installation and registry-access troubleshooting.
 
 ## Code boundaries
 

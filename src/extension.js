@@ -29,7 +29,7 @@ function panelMarkup(side, heading) {
     <textarea id="${side}-prompt" class="prompt-override" rows="6" placeholder="Uses shared prompt"></textarea></details>
     <div id="${side}-technicalSlot"><details class="raw-editor"><summary>Paste / edit raw response</summary>
     <label>Response <textarea id="${side}-response" rows="6" placeholder="Paste response or run a model"></textarea></label></details>
-    <details id="${side}-runner" class="runner"><summary>Run model (optional)</summary>
+    <details id="${side}-runner" class="runner"><summary>Provider settings and single-model run</summary>
       <label>Provider <select id="${side}-provider">
         <option value="vscode">VS Code models</option>
         <option value="manual">Manual / paste output</option>
@@ -42,7 +42,7 @@ function panelMarkup(side, heading) {
         <option value="max_tokens">max_tokens (legacy compatible API)</option>
       </select></label>
       <div class="runner-actions"><button id="${side}-key" type="button">Set API key</button>
-        <button id="${side}-run" type="button" class="primary">Run ${heading.toLowerCase()}</button></div>
+        <button id="${side}-run" type="button">Generate ${heading.toLowerCase()} (no tools)</button></div>
       <p id="${side}-status" class="runstatus" role="status"></p>
     </details>
     <details id="${side}-modelDetails"><summary>Model &amp; context details</summary>
@@ -83,21 +83,26 @@ function panelHtml(panel, context) {
   <section class="prompt"><div id="promptModelSlot" hidden></div><div id="sharedInstructions"><div class="instruction-heading"><label for="prompt">Agent instructions / shared prompt</label>
   <button id="loadInstructions" type="button">Load agent file</button></div>
   <textarea id="prompt" rows="2" placeholder="Enter the prompt shared by both models"></textarea></div>
-  <div class="instruction-heading"><span id="toolSelectionSummary" role="status">No tools selected</span>
-  <button id="selectTools" type="button">Select tools</button></div>
-  <p class="notice">Configure servers in VS Code using MCP: List Servers. Select exposed MCP or extension tools here; Chat selections are not inherited.
-  Before each test, mark only tools you have verified are read-only; all others are excluded. Both sides use the same verified tools.
-  Every call still needs confirmation. Writes, commands, code execution, and shared-state changes are not permitted. Text results only.
-  Individual Run buttons do not use tools; use Orchestrate Test for live runs.</p>
-  <details id="agentGuidance"><summary>Tool instructions (automatically added to End-to-end runs)</summary>
+  <section id="toolSetup" class="tool-setup" aria-labelledby="toolSetupHeading">
+  <div class="tool-setup-heading"><div>
+  <h2 id="toolSetupHeading">Investigation tools</h2>
+  <p id="toolSelectionSummary" role="status">No tools selected</p>
+  </div><button id="selectTools" type="button" aria-describedby="toolSelectionSummary">Select tools</button></div>
+  <p class="notice">Tools require fresh read-only verification for each test and approval for every call.
+  Verification is not a sandbox. No writes, commands, code execution, or shared-state changes.</p>
+  <details id="agentGuidance"><summary>Tool setup and safety</summary>
+  <p class="notice">Configure servers using MCP: List Servers in this VS Code window. Chat selections are not inherited.
+  Only text results are supported. Both sides receive the same verified tools. Use read-only server permissions.
+  Generation-only actions do not use tools. The following instructions are added to live investigations:</p>
   <pre class="response-content">${AGENT_PROMPT.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</pre></details>
+  </section>
   <label id="incomingMessageLabel" for="incomingMessage" class="evidence-label">Incoming message / trigger</label>
   <textarea id="incomingMessage" rows="3" placeholder="CodeMind mapped alert, normalized event JSON, or plain message"></textarea>
   <details id="evidenceOptions"><summary id="evidenceOptionsLabel">Source evidence (optional for live investigations)</summary>
   <label for="evidence" class="evidence-label">Source evidence / tool results</label>
   <textarea id="evidence" rows="3" placeholder="Optional for End-to-end agent; required for Model / prompt only"></textarea>
   </details>
-  <p id="investigationDescription" class="notice">End-to-end Orchestrate Test lets each model independently use your selected VS Code tools. No pasted evidence is required.</p></section>
+  <p id="investigationDescription" class="notice">Each model investigates independently with the selected tools. Evidence may differ.</p></section>
   <div class="columns">${panelMarkup('a', 'Baseline')}${panelMarkup('b', 'Candidate')}</div>
   <section id="promptTools" hidden>
   <details id="promptOptimizer" class="result-details"><summary>Help me improve this prompt</summary>
@@ -118,21 +123,34 @@ function panelHtml(panel, context) {
   <div id="promptProgressSlot"></div>
   <p class="notice">One action runs both prompts and reviews their outputs automatically. If evidence is blank, collect one shared snapshot using selected tools first. You do not need to run or evaluate either prompt separately.</p>
   </section>
-  <details id="promptAdvanced"><summary>Test settings and saved outputs (optional)</summary>
+  <section id="modelRunControls" class="comparison-controls" aria-label="Run comparison">
+  <div id="modelModeSlot"><label id="comparisonModeSetting">Comparison mode
+  <select id="comparisonMode"><option value="end-to-end">End-to-end agent</option>
+  <option value="model-prompt-only">Model / prompt only (frozen evidence required)</option></select></label></div>
+  <button id="orchestrate" type="button" class="primary">Run comparison</button>
+  <p id="comparisonRunSummary" class="notice"></p>
+  </section>
+  <details id="promptAdvanced" class="secondary-controls"><summary>Advanced settings</summary>
+  <div id="promptModeSlot"></div>
+  <div class="actionbar">
+  <label>Paired runs <input id="testRepetitions" type="number" min="1" max="5" value="3"></label>
+  <label>Required phrases (comma-separated) <input id="checks" placeholder="e.g. 401, 403"></label>
+  </div>
+  <label class="checkbox"><input id="checkOrder" type="checkbox" checked>Check reversed order (2 reviews)</label>
+  <p id="testBudget" class="notice"></p>
+  </details>
+  <details id="otherActions" class="secondary-controls"><summary>Other actions</summary>
+  <div id="modelOtherActions" class="secondary-actions">
+  <div><button id="runBoth" type="button">Generate both (no tools)</button><p class="notice">Generate responses only; skip tools and quality review.</p></div>
+  <div><button id="compare" type="button">Compare text only</button><p class="notice">Diff existing responses without calling a model.</p></div>
+  <div><button id="evaluate" type="button">Review existing responses</button><p class="notice">Evaluate the current responses with Copilot; do not regenerate them.</p></div>
+  <div><button id="chat" type="button">Open review in Chat</button><p class="notice">Open a draft to inspect and send yourself.</p></div>
+  </div>
+  <div id="promptOtherActions" class="secondary-actions" hidden>
   <button id="promptReviewOutputs" type="button">Review pasted outputs only</button>
   <button id="promptFreshEvidence" type="button">Collect fresh evidence and test prompts</button>
-  <div class="actionbar"><label>Required phrases (comma-separated) <input id="checks" placeholder="e.g. 401, 403"></label>
-  <label>Comparison mode <select id="comparisonMode"><option value="end-to-end">End-to-end agent</option>
-  <option value="model-prompt-only">Model / prompt only (frozen evidence required)</option></select></label>
-  <button id="runBoth" type="button">Run both</button><button id="compare">Compare text</button></div>
-  <section class="test-controls" aria-label="Controlled test">
-  <label>Paired runs <input id="testRepetitions" type="number" min="1" max="5" value="3"></label>
-  <button id="orchestrate" type="button" class="primary">Orchestrate Test</button>
-  <p id="testBudget" class="notice"></p></section>
-  <div class="review-actions"><label class="checkbox"><input id="checkOrder" type="checkbox" checked>Check reversed order (2 reviews)</label>
-  <button id="chat" type="button">Analyze in Copilot Chat</button>
-  <button id="evaluate" type="button" class="primary">Evaluate with Copilot</button>
-  </div></details>
+  </div>
+  </details>
   <div id="reviewProgressSlot"><section id="reviewProgress" class="review-progress" hidden aria-labelledby="reviewProgressTitle" aria-busy="false">
   <div class="review-progress-heading"><span class="progress-spinner" aria-hidden="true"></span>
   <h3 id="reviewProgressTitle" role="status">Preparing prompt review</h3><span id="reviewElapsed" aria-live="off"></span></div>
@@ -167,11 +185,12 @@ function panelHtml(panel, context) {
   History contains prompts, responses, and retained evidence. Oldest entries are removed beyond 50 entries or 100 MiB; export important comparisons.</p>
   <p class="notice">Opening an entry loads an editable copy in Compare without rerunning models. Editing it never overwrites the saved entry.</p>
   <p id="historyStatus" class="runstatus" role="status"></p><div id="historyList"></div></section>
-  <footer>VS Code model runs use your configured model access. Evaluation sends the supplied task, evidence, and responses through your Copilot access.
+  <footer><details><summary>Data and model usage</summary>
+  <p>VS Code model runs use your configured model access. Evaluation sends the supplied task, evidence, and responses through your Copilot access.
   Invalid citations may trigger one extra correction request.
   Chat opens a draft for review before sending.
   Other model requests go only to the endpoint you explicitly run.
-  API keys stay in VS Code SecretStorage; prompts and responses can be sensitive when exported.</footer>
+  API keys stay in VS Code SecretStorage; prompts and responses can be sensitive when exported.</p></details></footer>
   </main><script nonce="${nonce}" src="${media('markdown.js')}"></script>
   <script nonce="${nonce}" src="${media('app.js')}"></script></body></html>`;
 }

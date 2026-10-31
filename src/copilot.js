@@ -6,6 +6,7 @@ const { PROMPT_REVIEW_INSTRUCTIONS } = require('./prompt-review');
 const { resolvePrompt, reviewPacket, parseAssessment, CitationValidationError, REVIEW_RUBRIC, REVIEW_INSTRUCTIONS } = require('./core');
 const MAX_PROMPT_CHARACTERS = 150000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
 // VS Code's public model objects omit the provider's isUserSelectable flag.
 const CORE_ONLY_COPILOT_MODELS = new Set(['copilot-dictation-cleanup-nano', 'copilot-dictation-cleanup-luna']);
 
@@ -49,15 +50,17 @@ function unavailableModelsError(models, evaluator = false) {
 }
 
 async function chooseModel(vscode, evaluator) {
-  for (;;) {
+  for (; ;) {
     const catalog = await discoverModels(vscode, evaluator ? { vendor: 'copilot' } : {});
     const models = catalog.filter(model => !unavailableModelReason(model));
     if (models.length) {
       const selected = await vscode.window.showQuickPick(models.map(model => ({
         label: model.name, description: model.vendor + ' | ' + model.id,
         detail: 'Version: ' + (model.version || 'Not reported') + ' | Input limit: ' + (model.maxInputTokens ?? 'Not reported'), model
-      })), { title: evaluator ? 'CompareLab: choose a Copilot evaluator' : 'CompareLab: choose a VS Code model',
-        placeHolder: 'Callable models exposed to this extension (not session-only agents)' });
+      })), {
+        title: evaluator ? 'CompareLab: choose a Copilot evaluator' : 'CompareLab: choose a VS Code model',
+        placeHolder: 'Callable models exposed to this extension (not session-only agents)'
+      });
       return selected?.model;
     }
     const error = unavailableModelsError(catalog, evaluator);
@@ -112,7 +115,7 @@ async function resolveRunModels(vscode, variants, { requireTools = false } = {})
     if (!model) throw new Error('The ' + side + ' VS Code model is no longer available. Use Select model to choose an available model.');
     assertCallableModel(model, 'The ' + side);
     if (requireTools && (model.capabilities?.supportsToolCalling === false || model.capabilities?.toolCalling === false ||
-        model.capabilities?.toolCalling === 0)) {
+      model.capabilities?.toolCalling === 0)) {
       throw new Error('The ' + side + ' model does not support tool calling. Use Select model to choose a tool-capable chat model for tool-enabled runs.');
     }
     selected[side] = model;
@@ -165,8 +168,10 @@ async function runWithVsCode(vscode, input, model, token, { conversation, tools,
         ' reports an input limit of ' + model.maxInputTokens.toLocaleString('en-US') +
         '. Select a larger-context shared model. All evidence was preserved; nothing was truncated.');
     }
-    const response = await model.sendRequest(messages, tools?.length ? { tools: tools.map(({ name, description, inputSchema }) =>
-      ({ name, description, inputSchema })) } : {}, cancellation.token);
+    const response = await model.sendRequest(messages, tools?.length ? {
+      tools: tools.map(({ name, description, inputSchema }) =>
+        ({ name, description, inputSchema }))
+    } : {}, cancellation.token);
     let text = '';
     let bytes = 0;
     const toolCalls = [];
@@ -200,13 +205,15 @@ async function runWithVsCode(vscode, input, model, token, { conversation, tools,
       ...toolCalls.map(call => new vscode.LanguageModelToolCallPart(call.callId, call.name, call.input))
     ]) : text, cancellation.token);
     check();
-    return { provider: 'vscode', model: model.id, reportedModel: model.id, modelVendor: model.vendor, modelVersion: model.version,
+    return {
+      provider: 'vscode', model: model.id, reportedModel: model.id, modelVendor: model.vendor, modelVersion: model.version,
       prompt, ...(systemPrompt ? { systemPrompt } : {}), response: text, requestMessages,
       ...(tools ? { toolCalls } : {}),
       estimatedInputTokens, estimatedOutputTokens, inputTokens: null, outputTokens: null,
       usageTurns: [usageTurn({ model: model.id, estimatedInputTokens, estimatedOutputTokens })],
       contextWindowTokens: null, contextWindowSource: 'unverified',
-      maxOutputTokens: null, temperature: null, finishReason: null, runId: null, elapsedMs: Date.now() - started };
+      maxOutputTokens: null, temperature: null, finishReason: null, runId: null, elapsedMs: Date.now() - started
+    };
   } catch (error) {
     if (timedOut) throw new Error('VS Code model request timed out after 180 seconds.');
     if (/only available to VS Code core/i.test(error.message || '')) {
@@ -216,7 +223,7 @@ async function runWithVsCode(vscode, input, model, token, { conversation, tools,
   } finally { clearTimeout(timer); listener?.dispose(); cancellation.dispose(); }
 }
 
-async function evaluateWithCopilot(vscode, input, model, token, progress = () => {}) {
+async function evaluateWithCopilot(vscode, input, model, token, progress = () => { }) {
   assertCallableModel(model);
   if (!Number.isSafeInteger(model.maxInputTokens)) {
     throw new Error('The evaluator does not report a usable input-token limit. Select another evaluator; evidence will not be truncated.');
@@ -239,7 +246,7 @@ async function evaluateWithCopilot(vscode, input, model, token, progress = () =>
       checkCancellation();
       const instructions = REVIEW_INSTRUCTIONS + (input.comparisonKind === 'prompt' ? PROMPT_REVIEW_INSTRUCTIONS : '') + correction;
       const messages = [vscode.LanguageModelChatMessage.User(instructions),
-        vscode.LanguageModelChatMessage.User(packetText)];
+      vscode.LanguageModelChatMessage.User(packetText)];
       let inputTokens = 0;
       for (const message of messages) {
         const count = await model.countTokens(message, token);

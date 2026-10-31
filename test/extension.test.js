@@ -148,6 +148,11 @@ const visibleText = node => [node.textContent || '', ...(node.children || []).ma
 
 test('native tool selection persists independent drafts and never invokes a tool or saves approval', async () => {
   const instance = host();
+  const toolPanel = instance.markup.match(/<section id="toolSetup"[\s\S]*?<\/section>/)[0];
+  assert.match(toolPanel, /aria-labelledby="toolSetupHeading"/);
+  assert.match(toolPanel, /<h2 id="toolSetupHeading">Investigation tools<\/h2>/);
+  assert.match(toolPanel, /id="selectTools" type="button" aria-describedby="toolSelectionSummary"/);
+  assert.doesNotMatch(toolPanel, /class="primary"/);
   instance.vscode.lm = { tools: [{ name: 'mcp_search', description: 'Search', inputSchema: { type: 'object' }, tags: ['mcp'] }],
     invokeTool: async () => { throw new Error('Selection must not invoke tools'); } };
   const panel = webview(experiment());
@@ -583,6 +588,52 @@ test('prompt comparison has one primary review action and hides legacy model act
   }
   assert.equal(panel.field('promptReviewOutputs').hidden, true);
   assert.match(host().markup, />Review prompt change<\/button>/);
+});
+
+test('model comparison promotes one run-and-review action and keeps secondary actions collapsed', () => {
+  const markup = host().markup;
+  const controls = markup.match(/<section id="modelRunControls"[\s\S]*?<\/section>/)[0];
+  assert.match(controls, /id="orchestrate" type="button" class="primary">Run comparison/);
+  assert.equal((controls.match(/<button /g) || []).length, 1);
+  assert.match(markup, /<details id="promptAdvanced"[^>]*><summary>Advanced settings/);
+  const actions = markup.match(/<details id="otherActions"[\s\S]*?<\/details>/)[0];
+  for (const label of ['Generate both (no tools)', 'Compare text only', 'Review existing responses', 'Open review in Chat']) {
+    assert.ok(actions.includes('>' + label + '</button>'));
+  }
+  assert.doesNotMatch(actions, /class="primary"/);
+  assert.equal((markup.match(/class="primary"/g) || []).length, 2, 'Only the model and prompt workflow actions are primary');
+  const panel = webview({ ...experiment(), test: { repetitions: 3 } });
+  assert.equal(panel.field('modelRunControls').hidden, false);
+  assert.equal(panel.field('promptAdvanced').open, false);
+  assert.equal(panel.field('otherActions').open, false);
+  assert.match(panel.field('comparisonRunSummary').textContent, /3 paired runs; 6 reviews/);
+  assert.ok(panel.field('modelModeSlot').children.includes(panel.field('comparisonModeSetting')));
+  panel.click('orchestrate');
+  assert.equal(panel.messages.at(-1).type, 'orchestrate');
+  for (const [id, type] of [['runBoth', 'runBoth'], ['compare', 'compare'], ['evaluate', 'evaluate'], ['chat', 'chat']]) {
+    panel.click(id);
+    assert.equal(panel.messages.at(-1).type, type);
+  }
+  panel.field('testRepetitions').value = 1;
+  panel.field('checkOrder').checked = false;
+  panel.field('testRepetitions').listeners.get('input')();
+  assert.match(panel.field('comparisonRunSummary').textContent, /1 paired run; 1 review\./);
+  panel.field('comparisonMode').value = 'model-prompt-only';
+  panel.field('comparisonMode').listeners.get('input')();
+  assert.match(panel.field('investigationDescription').textContent, /without live tools/);
+  panel.click('promptTab');
+  assert.equal(panel.field('modelRunControls').hidden, true);
+  assert.equal(panel.field('modelOtherActions').hidden, true);
+  assert.equal(panel.field('promptOtherActions').hidden, false);
+  assert.ok(panel.field('promptModeSlot').children.includes(panel.field('comparisonModeSetting')));
+  panel.click('compareTab');
+  assert.equal(panel.field('comparisonMode').value, 'model-prompt-only');
+  assert.equal(panel.field('testRepetitions').value, 1);
+  assert.equal(panel.field('checkOrder').checked, false);
+  assert.equal(panel.field('modelOtherActions').hidden, false);
+  assert.equal(panel.field('promptOtherActions').hidden, true);
+  assert.equal(panel.field('promptAdvanced').open, false);
+  assert.equal(panel.field('otherActions').open, false);
 });
 
 test('prompt diff groups word edits into readable before/after passages with a collapsed full diff', () => {
@@ -1525,7 +1576,7 @@ test('full investigations retain complete evidence and token estimates through U
   await instance.send({ type: 'report', experiment: exported });
   assert.doesNotMatch(instance.files[1], /Budget-limited investigation/);
   assert.match(instance.files[1], /estimatedOutputTokens/);
-  assert.match(instance.markup, /Tool instructions/);
+  assert.match(instance.markup, /Tool setup and safety/);
   assert.doesNotMatch(instance.markup, /Shared budget instructions|50,000/);
   instance.vscode.window.showOpenDialog = async () => ['saved-test.json'];
   instance.vscode.workspace.fs.readFile = async () => Buffer.from(JSON.stringify(exported));

@@ -1,12 +1,14 @@
 # Security
 
-CompareLab is a local-first VS Code extension. Manual comparisons and the CLI work without model-network calls. **Run / Run both** send prompts to the selected provider endpoint. **Evaluate with Copilot** sends supplied tasks, evidence, and responses through VS Code's Language Model API after model selection and any required consent. **Analyze in Copilot Chat** opens an unsent draft; review it before sending. Provider and Copilot policies, usage charges, and retention rules apply.
+CompareLab is a local-first VS Code extension. Manual comparisons and the CLI work without model-network calls. Generation-only actions send prompts to the selected provider without tools. Under **Other actions**, **Review existing responses** sends supplied tasks, evidence, and responses through VS Code's Language Model API after model selection and any required consent. **Open review in Chat** opens an unsent draft; review it before sending. Provider and Copilot policies, usage charges, and retention rules apply.
 
 ## Credentials
 
-**Orchestrate Test** explicitly authorizes a bounded batch of provider generations plus Copilot reviews. The panel previews request counts; citation corrections may add one review request per pair. Both providers receive the same supplied instructions, trigger and evidence. No Kafka subscription, production remediation, or live tool investigation is performed.
+**Run comparison** starts paired generations and Copilot reviews using the selected comparison mode. The panel previews paired-run and review counts; **Advanced settings** contains the detailed request summary. Citation corrections may add one review request per pair. Frozen-evidence runs share the supplied evidence. End-to-end runs let each model investigate independently using the same selected tools; their evidence and request counts can differ.
 
-VS Code models are discovered through the editor's Language Model API and use the user's existing provider access, consent and policy. CompareLab does not read those credentials. Inputs are sent only by explicit Run/Orchestrate actions. This integration supplies no tools or privileged system messages; provider controls and actual usage are not inferred from token estimates.
+Live runs and shared-evidence collection require fresh verification of read-only tools and confirmation for every invocation. Writes, commands, code execution, and shared-state changes are prohibited. Verification is a user declaration, not a sandbox or proof of provider behavior; use trusted providers and read-only server permissions. See [tool selection and safety](docs/guide.md#selecting-vs-code-tools).
+
+VS Code models are discovered through the editor's Language Model API and use the user's existing provider access, consent and policy. CompareLab does not read those credentials. Generation and review require explicit user actions. VS Code models receive instructions as user context, not privileged system messages; provider controls and actual usage are not inferred from token estimates.
 
 - OpenAI-compatible bearer keys are captured through a masked VS Code input and stored in **SecretStorage**, scoped to the normalized endpoint.
 - Keys are not included in Webview experiment state, JSON exports, Markdown reports, or code.

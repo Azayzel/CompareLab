@@ -132,6 +132,10 @@
     $('orchestrate').disabled = $('runBoth').disabled;
     $('promptTest').disabled = $('orchestrate').disabled;
     const repetitions = Number($('testRepetitions').value || 3);
+    const reviews = repetitions * ($('checkOrder').checked ? 2 : 1);
+    $('comparisonRunSummary').textContent = 'Runs both models and reviews their outputs. ' +
+      repetitions + ' paired run' + (repetitions === 1 ? '' : 's') + '; ' +
+      reviews + ' review' + (reviews === 1 ? '' : 's') + '. Adjust in Advanced settings.';
     $('testBudget').textContent = repetitions * 2 + ($('comparisonMode').value === 'end-to-end' ? ' agent investigations; ' : ' generation requests; ') + repetitions * ($('checkOrder').checked ? 2 : 1) +
       ' review requests, plus up to ' + repetitions + ' citation corrections. ' +
       ($('comparisonMode').value === 'end-to-end'
@@ -144,8 +148,10 @@
     $('promptTools').hidden = !prompt;
     if (promptLayout !== prompt) {
       $(prompt ? 'promptModelSlot' : 'a-modelSlot').appendChild($('a-modelSettings'));
+      $(prompt ? 'promptModeSlot' : 'modelModeSlot').appendChild($('comparisonModeSetting'));
       for (const side of ['a', 'b']) $(prompt ? 'promptAdvanced' : side + '-editor').appendChild($(side + '-technicalSlot'));
-      $('promptAdvanced').open = !prompt;
+      $('promptAdvanced').open = false;
+      $('otherActions').open = false;
       $('promptAudit').open = !prompt;
       $('evidenceOptions').open = !prompt;
       $('shareActions').open = !prompt;
@@ -153,13 +159,15 @@
       promptLayout = prompt;
     }
     $('promptModelSlot').hidden = !prompt;
+    $('modelRunControls').hidden = prompt;
+    $('modelOtherActions').hidden = prompt;
+    $('promptOtherActions').hidden = !prompt;
     for (const id of ['runBoth', 'compare', 'orchestrate', 'chat', 'evaluate', 'a-run']) $(id).hidden = prompt;
     $('promptReviewOutputs').hidden = !prompt;
     $('shareActionsLabel').hidden = !prompt;
     $('historySave').textContent = prompt ? 'Save prompt comparison to History' : 'Save to history';
     $('incomingMessageLabel').textContent = prompt ? 'Shared input / alert' : 'Incoming message / trigger';
     $('evidenceOptionsLabel').textContent = prompt ? 'Shared evidence snapshot (optional; collected automatically)' : 'Source evidence (optional for live investigations)';
-    $('agentGuidance').hidden = prompt;
     if ($('comparisonMode').options) $('comparisonMode').options[1].textContent = prompt
       ? 'Same evidence (collect once or reuse supplied snapshot)' : 'Model / prompt only (frozen evidence required)';
     $('sharedInstructions').hidden = prompt;
@@ -170,7 +178,9 @@
       ? $('comparisonMode').value === 'end-to-end'
         ? 'Independent read-only investigations: evidence may differ, so prompt effects are harder to isolate. Read-only declarations do not guarantee isolation.'
         : 'Shared evidence: collect one snapshot using selected tools if blank, then give both prompts the exact same evidence without live tools.'
-      : 'End-to-end Orchestrate Test lets each model independently use your selected VS Code tools. Different evidence or shared-state changes prevent isolated model-quality attribution.';
+      : $('comparisonMode').value === 'end-to-end'
+        ? 'Each model investigates independently with the selected tools. Evidence may differ; this is not an isolated test of model quality.'
+        : 'Both models use the supplied evidence without live tools. Add a source snapshot before running the comparison.';
     $('b-modelSettings').hidden = prompt;
     $('b-runner').hidden = prompt;
     $('b-modelDetails').hidden = prompt;

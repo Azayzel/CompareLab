@@ -17,11 +17,35 @@ h1 { letter-spacing: 0; }
 .history-card .buttons { margin-top: 14px; }
 .model-choice input { min-width: 0; }
 .model-choice button { flex-shrink: 0; }
-.test-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 16px 0; border-top: 1px solid var(--vscode-panel-border); }
-.test-controls label { width: 100px; margin: 0; }
-.test-controls p { flex-basis: 100%; margin: 0; }
+.comparison-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; padding: 20px 0; border-top: 1px solid var(--vscode-panel-border); margin-top: 20px; }
+#modelModeSlot { flex: 1; min-width: min(100%, 240px); }
+.comparison-controls label { margin: 0; }
+.comparison-controls > p { flex-basis: 100%; margin: 0; }
+.secondary-controls { margin: 12px 0; }
+.secondary-controls > summary { font-weight: 600; }
+.secondary-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding: 12px 0; }
+.secondary-actions button { max-width: 100%; white-space: normal; }
+@media (max-width: 720px) {
+  .comparison-controls > button { width: 100%; }
+  .secondary-actions { grid-template-columns: minmax(0, 1fr); }
+}
 .instruction-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
 .instruction-heading label { margin: 0; }
+.tool-setup { margin: 16px 0; padding: 16px; border: 1px solid var(--vscode-panel-border); border-inline-start: 3px solid var(--vscode-textLink-foreground, var(--vscode-focusBorder)); border-radius: 8px; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); }
+.tool-setup-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.tool-setup-heading > div { min-width: 0; }
+.tool-setup-heading h2 { margin: 0; color: var(--vscode-foreground); }
+#toolSelectionSummary { margin: 6px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+#selectTools { flex-shrink: 0; border-color: var(--vscode-textLink-foreground, var(--vscode-focusBorder)); background: var(--vscode-button-secondaryBackground, var(--vscode-input-background)); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font-weight: 600; padding: 10px 16px; }
+#selectTools:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-input-background)); }
+#selectTools:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 3px; }
+.tool-setup > .notice { margin: 14px 0 0; line-height: 1.6; }
+.tool-setup details { margin-top: 6px; }
+.tool-setup summary { padding-bottom: 0; }
+@media (max-width: 720px) {
+  .tool-setup-heading { align-items: stretch; flex-direction: column; gap: 12px; }
+  #selectTools { width: 100%; }
+}
 #testResults { padding: 16px 0; border-top: 1px solid var(--vscode-panel-border); overflow-wrap: anywhere; }
 .prompt, #results { border: 0; border-radius: 0; padding: 16px 0; }
 .columns { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
@@ -29,7 +53,7 @@ h1 { letter-spacing: 0; }
 .columns section textarea.prompt-override { min-height: 60px; }
 .comparison-prompt .prompt-override-details > summary { display: none; }
 .comparison-prompt .prompt-override-details textarea { min-height: 220px; }
-.comparison-model > #promptAdvanced > summary, .comparison-model > #promptAudit > summary,
+.comparison-model > #promptAudit > summary,
 .comparison-model #evidenceOptions > summary { display: none; }
 .comparison-model #promptFreshEvidence { display: none; }
 .comparison-prompt > #promptAdvanced, .comparison-prompt > #promptAudit { margin-top: 20px; }
