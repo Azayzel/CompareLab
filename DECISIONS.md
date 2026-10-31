@@ -2,10 +2,13 @@
 
 Architectural choices, assumptions, and the cost of those choices.
 
+See [module ownership](CONTRIBUTING.md#code-boundaries) for the source layout and the [user guide](docs/guide.md) for operating details.
+
 | Choice | Why | Consequence |
 | --- | --- | --- |
 | **VS Code-first** | Compare outputs where engineers already work | No hosted browser product in the initial scope |
-| **Two-panel Webview** | Preserves the minimal UI the user preferred | More than two simultaneous variants deferred |
+| **Separate model and prompt workflows** | Make the comparison intent explicit | Each tab retains its own draft; comparisons still have two variants |
+| **One primary action per workflow** | Avoid competing generation and evaluation buttons | Run comparison and Review prompt change generate and review; advanced settings and standalone actions remain secondary |
 | **Plain JS/CSS; no runtime npm packages** | Small footprint, no framework build step | UI stays deliberately modest |
 | **Shared `src/comparison/core.js`** | CLI, extension and future automation can share the same comparison semantics | Request execution and UI behavior stay outside the engine |
 | **Responsibility-based CommonJS modules** | Make comparison, provider, tool, record, metric, and rendering code easy to locate | Explicit imports; no barrel modules, framework, or build-time abstraction |
@@ -13,10 +16,14 @@ Architectural choices, assumptions, and the cost of those choices.
 | **Native Ollama `/api/chat`** | Local-model use with provider usage/finish metadata | Model IDs must already be known/installed |
 | **OpenAI-compatible Chat Completions** | Broad compatibility via simple HTTP | Responses API and some provider-specific features unsupported |
 | **Optional `max_completion_tokens` / `max_tokens`** | Accommodates different compatible servers | User must know the selected endpoint's dialect |
-| **Explicit model-facing messages** | Generic prompts use one user message; CodeMind events retain system/user roles | No live tools, retrieval or multimedia are added by the runner |
+| **Explicit model-facing messages** | Preserve task and incoming-event context across providers | HTTP providers support system/user roles; VS Code receives instructions as user context, not a privileged system message |
 | **Shared prompt when override is blank** | Invisible whitespace must not mask a populated task | Review, runs, reports, and cache identity share resolution; meaningful prompt text is preserved exactly |
-| **Sequential Run both** | Reduces local GPU contention | Not a concurrent throughput/latency benchmark |
-| **Controlled paired orchestration** | Freeze inputs, alternate generation order, and reuse one evaluator across 1-5 pairs | Measures one task; does not establish statistical significance or universal model superiority |
+| **Sequential generation** | Reduces local GPU contention | Generate both (no tools) skips tools and review; timing is not a concurrent throughput benchmark |
+| **Controlled paired orchestration** | Snapshot configuration, alternate generation order, and reuse one evaluator across 1-5 pairs | Live investigations can gather different evidence; repetitions of one task are not a representative benchmark |
+| **Native VS Code tool discovery** | Reuse configured MCP and extension tools without a vendor allowlist or separate client | Chat selections are not inherited; provider setup and authentication remain in VS Code |
+| **Fresh read-only verification and per-call approval** | Keep tool availability separate from permission to invoke it | Unmarked tools are excluded; saved selections grant no approval; declarations are not sandboxing |
+| **Frozen evidence for prompt edits by default** | Separate instruction effects from differences in discovered evidence | Collect once or reuse supplied evidence, then run both prompts without live tools; results remain untrusted data |
+| **No artificial investigation budget** | Let agents gather the evidence needed for the task | Provider limits, per-request timeouts, record-size limits, and cancellation still apply; call counts and costs can vary |
 | **CodeMind web-event normalization** | Mirror `MappedAlertMapper` and the web `AgentDefinitionRunner` message roles | Does not reproduce backend safety/report additions, Kafka filtering, trusted hashes, mobile scope, or live tools |
 | **Bounded retained test records** | Export original instructions, trigger, frozen evidence, all retained results and measurements | 8 MiB cap; failures/cancellation remain explicit; imported artifacts are not authenticated attestations |
 | **Explicit context-window provenance** | Configured maximum does not prove effective input capacity | Unknown capacities and actual usage are surfaced, not guessed |
@@ -33,8 +40,8 @@ Architectural choices, assumptions, and the cost of those choices.
 | **Source citation validation and abstention** | Accept whitespace-only differences while retaining the source passage; reject altered claims | Valid quotations can still be misinterpreted; human calibration remains necessary |
 | **One citation correction request per evaluation** | Recover from model quotation errors without unbounded retries | Extra usage is recorded; persistent failures stop the evaluation, with no relaxed semantic matching |
 | **Separate fresh Chat draft** | Allows interactive investigation with available tools | Workbench-command compatibility needs testing; no automatic submission or answer capture |
-| **Assessment bound to source inputs** | Prevent stale results from being attributed to changed evidence/responses | Assessment lives in memory; JSON import does not restore it, Markdown preserves findings |
-| **JSON and Markdown exports** | Portable, Git-friendly artifacts | Sensitive prompts/responses require review before sharing |
+| **Assessment bound to source inputs** | Prevent stale results from being attributed to changed evidence/responses | Edits invalidate attached results; history retains saved reviews and orchestrated JSON retains per-pair assessments |
+| **Local history and portable exports** | Reopen comparisons without rerunning models; share JSON, Markdown, or self-contained HTML | History is unencrypted; prompts, responses, and tool evidence require review before sharing |
 | **Advisory CI, not a release gate** | Passive measurement consistent with original comparison skill | No automated promotion/blocking decisions |
 
 ## Current comparability rules
@@ -47,8 +54,12 @@ Run metadata such as provider IDs may be absent; a user-entered context-window v
 
 ## Security boundaries and limitations
 
-API keys are entered in VS Code and stored in SecretStorage, not in experiment JSON. The editor UI uses a content-security policy and `textContent` for response text. Provider requests require Run or Orchestrate Test; Copilot requests require explicit evaluation or orchestration. Chat handoff creates an unsent draft. Compatible endpoints are not verified/trusted merely because the URL passes validation.
+API keys are entered in VS Code and stored in SecretStorage, not in experiment JSON. The editor UI uses a content-security policy and `textContent` for response text. Model calls require explicit generation, comparison, review, or draft-generation actions. Chat handoff creates an unsent draft. Compatible endpoints are not verified/trusted merely because the URL passes validation.
+
+Live investigations and evidence collection use only tools freshly marked read-only for that test, with confirmation for every invocation. Writes, commands, code execution, and shared-state changes are prohibited. This is a user declaration and approval boundary, not proof of provider behavior or isolation. Use trusted tools and read-only server permissions; cancellation cannot undo side effects. Imports and history never restore permission to run tools.
 
 The review prompt marks all supplied content as untrusted data. This is not a complete prompt-injection defense. In-panel evaluation exposes no tools; the separate Agent-mode draft requests read-only investigation but does not enforce tool permissions. Model identities can remain inside supplied prose despite anonymized labels.
 
-**Open issues:** live provider/Copilot/editor smoke tests, controlled multi-run experiments, judge calibration and additional provider interfaces. 
+**Validation:** automated tests cover module boundaries, mocked provider and tool calls, cancellation, record compatibility, and UI behavior. Architecture checks reject unresolved imports, dependency cycles, and direct VS Code bindings outside the entry point. These checks do not certify live provider or editor integration.
+
+**Open issues:** live provider/Copilot/editor smoke tests, representative multi-task experiments, judge calibration, and additional provider interfaces.
