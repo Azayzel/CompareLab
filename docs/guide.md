@@ -18,13 +18,13 @@ Requires **VS Code 1.90+** and **Node.js 20+** for development.
 
 1. Clone this repository and open it in VS Code.
 2. Open **Run and Debug**, select **Run CompareLab Extension**, and press **F5** to open a separate **Extension Development Host** window (on macOS, you may need **Fn+F5**).
-3. In that **new window**, open the Command Palette (**Cmd+Shift+P** on macOS; **Ctrl+Shift+P** on Windows/Linux) and choose **CompareLab: Compare Model Outputs**. This opens the comparison interface in an editor tab.
+3. In that **new window**, click the **CompareLab** Activity Bar icon and choose **Open CompareLab**. Alternatively, run **CompareLab: Compare Model Outputs** from the Command Palette. Both open the same comparison interface in an editor tab.
 4. The default **Model comparison** tab compares two models with shared instructions. Enter **Agent instructions / shared prompt** or choose **Load agent file**. Put the original alert or message in **Incoming message / trigger**. Open **Paste / edit raw response** to compare saved outputs, or select models to generate fresh responses.
 5. Click **Select model** for Baseline and Candidate. Choose **End-to-end agent** for live tools, or **Model / prompt only** with supplied evidence. For live tools, configure/start MCP servers in this window using **MCP: List Servers**, then click **Select tools**.
 6. Click **Run comparison** to generate and review both outputs. The visible summary shows planned pairs and reviews; open **Advanced settings** to change repetitions, reversed-order checks, or required phrases. Each live model receives the same verified tools but makes independent requests; every invocation requires confirmation.
 7. Read the completed assessment and reports. Use **Save / export** for JSON, Markdown, or a self-contained HTML report.
 
-**No CompareLab command or panel?** Opening this repository does not install the extension in your regular VS Code window. Use the separate Extension Development Host window from step 2. CompareLab has no dedicated sidebar or bottom-panel view; its editor tab appears only after running the command.
+**No CompareLab icon or command?** Opening this repository does not install the extension in your regular VS Code window. Use the separate Extension Development Host window from step 2, or install a VSIX. The sidebar provides a launcher; comparisons open in the wider editor area.
 
 **Docs/demo examples:** the [read-only GitHub screenshot walkthrough](../examples/github-tools-demo.md) includes copy-paste tasks, a [loadable triage agent](../examples/github-triage.agent.md), a controlled prompt edit, and suggested screenshot captions.
 
@@ -67,7 +67,7 @@ The report uses no CDN, external fonts, or automatic network requests. JavaScrip
 
 Export makes no model or tool requests. Like JSON and Markdown exports, HTML includes prompts, responses, and source evidence: review the file for sensitive information before sharing.
 
-The extension can run from source or be installed locally from a VSIX built below; it is not yet published to the VS Code Marketplace.
+The extension can run from source or be installed locally from a VSIX built below. Maintainers can enable [automated Marketplace and GitHub releases](../CONTRIBUTING.md#automated-releases).
 
 ## Build and package
 
@@ -82,12 +82,13 @@ This checks all JavaScript syntax, verifies required extension assets, prepares 
 To create a local, installable VS Code extension file for sharing (no publishing required):
 
 ```sh
+npm ci
 npm run package
 ```
 
-This uses the standard `@vscode/vsce` packager through `npx`, runs the build and tests through VS Code's prepublish hook, and writes **`dist/comparelab.vsix`**. Despite the hook's name, this command **does not upload or publish anything to npm or the VS Code Marketplace**. npm is used only to download the packaging tool; no npm or Marketplace publishing account is required.
+Use **Node.js 22+** for packaging. `npm ci` installs the locked development tools; `npm run package` runs the build and tests through VS Code's prepublish hook and writes **`dist/comparelab.vsix`**. Despite the hook's name, this command **does not upload or publish anything to npm or the VS Code Marketplace**. No publishing account is required.
 
-The packager is downloaded on demand and is not version-pinned; it requires approved npm access and a Node version supported by the resolved packager. No runtime dependencies are bundled, and the allowlist excludes tests, examples, local exports, and workspace settings. Repeating the command replaces the generated VSIX.
+The packager and dependency versions are locked; installation requires approved npm access. No runtime dependencies are bundled, and the allowlist excludes tests, examples, local exports, and workspace settings. Repeating the command replaces the generated VSIX. The Marketplace listing uses a PNG export of the SVG artwork; the sidebar uses the SVG directly.
 
 **Share directly:** send `dist/comparelab.vsix` to the recipient through your approved file-sharing channel. They can install that file using the instructions below without cloning the repository, building the extension, or downloading the packager. Their own model access and, for tool-enabled runs, configured tool providers/MCP connections are still required; your credentials and local comparison history are not bundled.
 

@@ -9,12 +9,12 @@ or paste existing responses. No hosted CompareLab service or runtime npm depende
 
 ## Quick start
 
-CompareLab is not on the VS Code Marketplace yet. To run it from source:
+To run CompareLab from source:
 
 1. Clone this repository and open it in VS Code.
 2. Press **F5** and select **Run CompareLab Extension**.
-3. In the new **Extension Development Host** window, run
-   **CompareLab: Compare Model Outputs** from the Command Palette.
+3. In the new **Extension Development Host** window, click the **CompareLab**
+   Activity Bar icon, then **Open CompareLab**.
 4. Choose **Model comparison** or **Prompt comparison** and follow the steps below.
 
 Requires Node.js 20+ and VS Code 1.90+. Live tools require VS Code 1.95+,
@@ -22,6 +22,7 @@ a tool-capable model, and a working tool provider in the same window.
 MCP support also depends on your VS Code version and server setup.
 
 Prefer a local install? See [build and installation](docs/guide.md#build-and-package).
+The **CompareLab: Compare Model Outputs** command remains available in the Command Palette.
 
 ## Compare models
 
@@ -74,10 +75,17 @@ without rerunning its models.
 
 ```sh
 npm run build    # Syntax checks, asset validation, and tests; no install needed
-npm run package  # Build a local VSIX; downloads the packager, does not publish
+npm ci           # Install pinned packaging tools (Node.js 22+)
+npm run package  # Build a local VSIX without publishing
 ```
 
 See [CONTRIBUTING](CONTRIBUTING.md) for the development workflow.
+
+## Releases
+
+After [publishing setup](CONTRIBUTING.md#automated-releases), each merge to `main`
+bumps the release patch version and publishes to the [Marketplace](https://marketplace.visualstudio.com/items?itemName=azayzel.comparelab)
+and [GitHub Releases](https://github.com/Azayzel/CompareLab/releases). Nothing publishes from pull requests.
 
 ## Documentation
 

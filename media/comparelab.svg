@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="128" height="128" aria-labelledby="title desc" role="img" version="1.1" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg" xmlns:cc="http://creativecommons.org/ns#" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+ <title id="title">CompareLab</title>
+ <desc id="desc">Two overlapping blue and violet speech brackets with opposing code chevrons</desc>
+ <!-- Transparent canvas; two flat brand colors only. -->
+ <!-- Left conversation bracket: code window with a speech tail -->
+ <path d="m21 20h55q10 0 10 10v5h-11v-3q0-2-2-2h-50q-3 0-3 3v43q0 3 3 3h10v10l12-10h4v11h-1l-18 17q-5 4-5-4v-13h-4q-12 0-12-12v-46q0-12 12-12z" fill="#2997FF" fill-rule="evenodd"/>
+ <!-- Right conversation bracket; overlaps without a gradient -->
+ <path d="m59 38h46q13 0 13 13v40q0 12-12 12h-3v12q0 6-5 2l-17-14h-21q-11 0-11-11v-5h11v3q0 2 3 2h23l6 6v-6h12q3 0 3-3v-37q0-3-3-3h-45q-3 0-3 3v6h-11v-7q0-13 14-13z" fill="#9360FF" fill-rule="evenodd"/>
+ <!-- Readable inward-facing code chevrons -->
+ <path d="m49 55-14 12 14 12" fill="none" stroke="#2997FF" stroke-linecap="round" stroke-linejoin="round" stroke-width="9"/>
+ <path d="m79 55 14 12-14 12" fill="none" stroke="#9360FF" stroke-linecap="round" stroke-linejoin="round" stroke-width="9"/>
+ <metadata>
+  <rdf:RDF>
+   <cc:Work rdf:about="">
+    <dc:title>CompareLab</dc:title>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+</svg>

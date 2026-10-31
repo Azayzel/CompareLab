@@ -41,3 +41,11 @@ VS Code models are discovered through the editor's Language Model API and use th
 ## Vulnerability reporting
 
 Avoid posting security details or sensitive data to public issues. Use the repository's **Report a vulnerability** private advisory feature when available, or an established private maintainer contact channel. Include reproduction steps and sanitized evidence.
+
+## Release publishing
+
+- Releases run only on pushes to `main`, not pull requests. Build and tests must pass before tagging or publishing.
+- The publishing job requests GitHub release/tag write access and an OIDC token. Configure the **marketplace** environment to accept only `main`, and bind the Marketplace trusted-publishing policy to this repository, workflow, and environment.
+- No long-lived Marketplace PAT is stored in the repository. Protect merges and changes to the release workflow; OIDC authenticates the workflow, not the safety of the source being published.
+- Draft releases retain the packaged VSIX for recovery. Reruns reuse that artifact and validate its extension identity and version before publishing; they do not overwrite an existing release asset.
+- Packaging dependencies are development-only and locked. They are excluded from the VSIX.

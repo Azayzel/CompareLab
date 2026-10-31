@@ -17,6 +17,7 @@ function host(overrides = {}, providerOverrides = {}, historyOverrides = {}) {
   let evaluations = 0;
   let onDispose;
   const historyEntries = [];
+  const treeProviders = [];
   const history = {
     async save(experiment, evaluation) {
       const entry = { id: 'history-' + (historyEntries.length + 1), savedAt: new Date().toISOString(),
@@ -42,6 +43,7 @@ function host(overrides = {}, providerOverrides = {}, historyOverrides = {}) {
   const vscode = {
     commands: { registerCommand: (name, callback) => { open = callback; return disposable; } },
     window: {
+      registerTreeDataProvider: (id, provider) => { treeProviders.push({ id, provider }); return disposable; },
       createWebviewPanel: () => ({ onDidDispose: callback => { onDispose = callback; return disposable; }, webview: {
         set html(value) { markup = value; },
         cspSource: 'self', asWebviewUri: uri => uri, postMessage: async message => messages.push(message),
@@ -77,12 +79,35 @@ function host(overrides = {}, providerOverrides = {}, historyOverrides = {}) {
   });
   module.exports.activate({ subscriptions: [], extensionUri: '/extension', globalStorageUri: { fsPath: '/history' }, secrets: { get: async () => undefined } });
   open();
-  return { messages, files, errors, vscode, markup, historyEntries, dispose: () => onDispose(),
+  return { messages, files, errors, vscode, markup, historyEntries, treeProviders, dispose: () => onDispose(),
     send: message => handler(message), evaluations: () => evaluations };
 }
 
 const experiment = () => ({ prompt: 'Review this task.', evidence: 'Shared source.',
   baseline: { response: 'First answer.' }, candidate: { response: 'Second answer.' } });
+
+test('sidebar launcher uses the SVG and opens the existing comparison command', () => {
+  const manifest = require('../package.json');
+  const instance = host();
+  assert.equal(instance.treeProviders.length, 1);
+  assert.equal(instance.treeProviders[0].id, 'comparelab.launcher');
+  assert.equal(instance.treeProviders[0].provider.getChildren().length, 0);
+  assert.ok(manifest.activationEvents.includes('onView:comparelab.launcher'));
+  assert.equal(manifest.contributes.viewsContainers.activitybar[0].icon, 'media/comparelab.svg');
+  assert.equal(manifest.contributes.views.comparelab[0].id, instance.treeProviders[0].id);
+  assert.equal(manifest.contributes.viewsWelcome[0].view, instance.treeProviders[0].id);
+  assert.match(manifest.contributes.viewsWelcome[0].contents, /\[Open CompareLab\]\(command:comparelab\.open\)/);
+  assert.match(instance.markup, /<title>CompareLab<\/title>/);
+});
+
+test('Marketplace icon is a packaged PNG at least 128 pixels square', () => {
+  const manifest = require('../package.json');
+  assert.equal(manifest.icon, 'media/comparelab-icon.png');
+  const icon = fs.readFileSync(path.join(__dirname, '..', manifest.icon));
+  assert.equal(icon.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  assert.ok(icon.readUInt32BE(16) >= 128);
+  assert.equal(icon.readUInt32BE(16), icon.readUInt32BE(20));
+});
 
 test('prompt override fields preserve multiline agent instructions in the real HTML', () => {
   const instance = host();
