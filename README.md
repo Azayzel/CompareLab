@@ -84,7 +84,7 @@ See [CONTRIBUTING](CONTRIBUTING.md) for the development workflow.
 ## Releases
 
 After [publishing setup](CONTRIBUTING.md#automated-releases), each merge to `main`
-bumps the release patch version and publishes to the [Marketplace](https://marketplace.visualstudio.com/items?itemName=azayzel.comparelab)
+bumps the release patch version and publishes to the [Marketplace](https://marketplace.visualstudio.com/items?itemName=azayzel-comparelab.comparelab)
 and [GitHub Releases](https://github.com/Azayzel/CompareLab/releases). Nothing publishes from pull requests.
 
 ## Documentation

@@ -74,7 +74,7 @@ jobs:
         if: steps.version.outputs.released != 'true'
         run: |
           unzip -p dist/comparelab.vsix extension/package.json |
-            node -e 'const fs = require("node:fs"); const assert = require("node:assert/strict"); const manifest = JSON.parse(fs.readFileSync(0, "utf8")); assert.equal(manifest.version, process.env.RELEASE_VERSION); assert.equal(manifest.publisher, "azayzel"); assert.equal(manifest.name, "comparelab");'
+            node -e 'const fs = require("node:fs"); const assert = require("node:assert/strict"); const expected = require("./package.json"); const manifest = JSON.parse(fs.readFileSync(0, "utf8")); assert.equal(manifest.version, process.env.RELEASE_VERSION); assert.equal(manifest.publisher, expected.publisher); assert.equal(manifest.name, expected.name);'
           if [ "$RESUMING" = "true" ]; then
             echo "Resuming the saved artifact; an already-published version is accepted."
             npm exec -- vsce publish --packagePath dist/comparelab.vsix --oidc --skip-duplicate
