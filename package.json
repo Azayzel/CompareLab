@@ -4,7 +4,7 @@
   "icon": "media/comparelab-icon.png",
   "description": "Compare AI models and prompt variants in VS Code with inline diffs, controlled evaluations, and local-first Ollama/OpenAI-compatible runners.",
   "version": "0.2.0",
-  "publisher": "azayzel",
+  "publisher": "azayzel-comparelab",
   "private": false,
   "license": "MIT",
   "repository": {

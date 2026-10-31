@@ -36,7 +36,7 @@ The `.vscodeignore` allowlist includes only the manifest, README, license, runti
 
 ### One-time maintainer setup
 
-1. Create or obtain access to the **azayzel** publisher at [Marketplace publisher management](https://marketplace.visualstudio.com/manage). The extension identity is `azayzel.comparelab`.
+1. Create or obtain access to the **azayzel-comparelab** publisher at [Marketplace publisher management](https://marketplace.visualstudio.com/manage). Use the Publisher ID, not its display name or your GitHub username. The extension identity is `azayzel-comparelab.comparelab`.
 2. Create a GitHub environment named **marketplace** in this repository. Restrict its deployment branches to **main**. Add reviewers only if you want a manual approval before each release.
 3. In the publisher's **Trusted Publishing** settings, create a policy with these exact values:
    - Repository owner: `Azayzel`
@@ -90,5 +90,12 @@ Marketplace icons must be PNG, so [media/comparelab-icon.png](media/comparelab-i
 - Update the relevant README, user guide, DECISIONS, and SKILL sections when behavior or module ownership changes.
 
 ## Pull requests
+
+`main` is protected by two active GitHub rulesets:
+
+- **Main - required tests** requires the GitHub Actions `test` check to pass against an up-to-date base, blocks force pushes and deletion, and has no bypass actors, including the owner.
+- **Main - pull request review** requires a PR and one code-owner approval, with stale approvals dismissed after new pushes. [CODEOWNERS](.github/CODEOWNERS) assigns all files to `@Azayzel`.
+
+Only `@Azayzel` may bypass the review ruleset when merging a PR, allowing owner-authored PRs without a second reviewer. This is a merger-based exemption, not an author-based one: the owner can also explicitly bypass review on another contributor's PR. It never bypasses required tests or permits direct pushes.
 
 Describe what changed, which tests passed, and whether you performed live provider or VS Code interaction tests. Provide sanitized screenshots for UI changes. Do not include real secrets or proprietary model prompts in issues, fixtures, or logs.
