@@ -24,6 +24,8 @@ npm run package
 
 Packaging requires **Node.js 22+**. The `@vscode/vsce` version and its dependencies are pinned in the manifest and lockfile; `npm ci` restores them. Its `vscode:prepublish` hook runs the build and tests before packaging, and the output is `dist/comparelab.vsix`. The extension runtime retains Node.js 20+ support. No publishing credentials are needed for local packaging.
 
+The project `.npmrc` uses `https://registry.npmjs.org/` so clean installs work on public GitHub runners. Do not commit organization-private registry settings.
+
 The scoped `minimatch` override addresses [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249) in the packager's dependency tree. Recheck package contents when updating it; development dependencies are not bundled into the VSIX.
 
 The `.vscodeignore` allowlist includes only the manifest, README, license, runtime source, and webview assets. Keep this list in sync when adding runtime files outside `src/` or `media/`. Tests, examples, local exports, editor configuration, and generated packages must not enter the VSIX. See [Build and package](docs/guide.md#build-and-package) for installation and registry-access troubleshooting.
@@ -52,6 +54,7 @@ See the [official trusted publishing setup](https://code.visualstudio.com/api/wo
 - Reserve and publish versions through this workflow only. Manually publishing the same extension/version outside it breaks the tag-to-artifact provenance used for recovery.
 - The workflow serializes releases with `queue: max`, retaining up to 100 pending runs instead of replacing pending merges. GitHub orders the queue by arrival, not guaranteed commit order; an ancestry check refuses to publish older or diverged source over a newer tagged commit.
 - After a successful build, a tag reserves the version and a draft release retains the VSIX. If publishing fails, fix the cause and **re-run all jobs on that original workflow run**. It reuses the tag and saved artifact; it does not allocate another patch or replace a published asset.
+- If installation fails before a tag is reserved and needs a repository change, merge the fix to `main` to start a new run. Rerunning the old run uses the old files, not the fix; no release version was reserved by that failed installation.
 - If Marketplace publication succeeded but GitHub publication failed, a retry accepts that existing Marketplace version and completes the GitHub Release. A completed release is a no-op on rerun.
 - Resolve failed releases before merging more changes. If a newer commit has already been tagged, an older unfinished release is intentionally blocked; inspect its draft rather than moving tags or publishing stale code.
 
