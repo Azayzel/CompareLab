@@ -7,7 +7,9 @@ Architectural choices, assumptions, and the cost of those choices.
 | **VS Code-first** | Compare outputs where engineers already work | No hosted browser product in the initial scope |
 | **Two-panel Webview** | Preserves the minimal UI the user preferred | More than two simultaneous variants deferred |
 | **Plain JS/CSS; no runtime npm packages** | Small footprint, no framework build step | UI stays deliberately modest |
-| **Pure `src/core.js`** | CLI, extension and future automation can share the same semantics | UI/provider concerns kept separate |
+| **Shared `src/comparison/core.js`** | CLI, extension and future automation can share the same comparison semantics | Request execution and UI behavior stay outside the engine |
+| **Responsibility-based CommonJS modules** | Make comparison, provider, tool, record, metric, and rendering code easy to locate | Explicit imports; no barrel modules, framework, or build-time abstraction |
+| **Injected VS Code API** | Test model adapters and panel rendering without an editor host | Only `src/extension.js` imports `vscode`; module dependencies remain acyclic |
 | **Native Ollama `/api/chat`** | Local-model use with provider usage/finish metadata | Model IDs must already be known/installed |
 | **OpenAI-compatible Chat Completions** | Broad compatibility via simple HTTP | Responses API and some provider-specific features unsupported |
 | **Optional `max_completion_tokens` / `max_tokens`** | Accommodates different compatible servers | User must know the selected endpoint's dialect |

@@ -1,6 +1,6 @@
 'use strict';
 const { isDeepStrictEqual } = require('node:util');
-const { usageTurn } = require('./usage');
+const { usageTurn } = require('../metrics/usage');
 const readOnlyCatalogs = new WeakMap();
 
 const AGENT_PROMPT = [

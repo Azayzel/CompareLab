@@ -1,11 +1,11 @@
 'use strict';
 
 const { createHash, randomUUID } = require('node:crypto');
-const { normalizedEndpoint, validateModelInput } = require('./providers');
+const { normalizedEndpoint, validateModelInput } = require('../providers/http');
 const { codeMindAlert, agentInstructions } = require('./inputs');
-const { isQueryEvidence, validateToolCatalog } = require('./tool-agent');
-const { LEGACY_LIMITS, legacyInstructions, legacyQueryEvidence } = require('./legacy-datadog');
-const { activity, usageReport, efficiencyMetrics, validateUsageTurns, TOKEN_FIELDS } = require('./usage');
+const { isQueryEvidence, validateToolCatalog } = require('../tools/agent');
+const { LEGACY_LIMITS, legacyInstructions, legacyQueryEvidence } = require('../records/legacy-datadog');
+const { activity, usageReport, efficiencyMetrics, validateUsageTurns, TOKEN_FIELDS } = require('../metrics/usage');
 const { validatePromptChanges } = require('./prompt-review');
 const { responseContent } = require('./response');
 const { validateCollection } = require('./prompt-evidence');

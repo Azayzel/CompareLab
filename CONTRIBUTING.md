@@ -27,17 +27,28 @@ The `.vscodeignore` allowlist includes only the manifest, README, license, runti
 
 ## Code boundaries
 
-- Keep reusable, deterministic comparison logic in `src/core.js`; the CLI and VS Code both use it.
-- Keep provider requests and normalization in `src/providers.js`.
-- Keep controlled-test plans, sequencing and record validation in `src/orchestration.js`; CodeMind incoming-message conversion belongs in `src/inputs.js`.
-- Keep Copilot model calls and Chat handoff in `src/copilot.js`; keep the rubric and citation validation in the shared core.
-- Keep the interface in `media/` and the small VS Code host in `src/extension.js`.
+| Module | Responsibility |
+| --- | --- |
+| [src/extension.js](src/extension.js) | VS Code entry point, panel lifecycle, command handling, and run coordination |
+| [src/comparison/](src/comparison/) | Comparison engine, rubric/citation validation, prompt workflows, input normalization, and paired orchestration |
+| [src/providers/http.js](src/providers/http.js) | Ollama and OpenAI-compatible requests and provider input validation |
+| [src/providers/vscode/](src/providers/vscode/) | `models.js`: discovery/selection; `generation.js`: model requests; `review.js`: evaluation and Chat handoff; `limits.js`: shared request limits |
+| [src/tools/agent.js](src/tools/agent.js) | Tool catalogs, fresh read-only verification, per-call approval, and investigation loop |
+| [src/metrics/](src/metrics/) | Usage accounting, efficiency calculations, and offline price data |
+| [src/records/](src/records/) | History persistence, trace imports/validation, and legacy record compatibility |
+| [src/reporting/](src/reporting/) | Standalone HTML report rendering |
+| [src/webview/panel.js](src/webview/panel.js), [media/](media/) | Editor-panel markup and browser-side behavior/styles |
+
+- Use explicit CommonJS imports from the owning module. Do not add catch-all utilities, barrel exports, or dependency containers just to shorten paths.
+- Only the extension entry point imports `vscode`. Pass the API into adapters and the panel renderer so they can be tested outside the editor.
+- Keep request execution separate from comparison rules and rendering. Pure helpers should not start model calls or write files.
+- Keep module dependencies acyclic. Architecture tests check import resolution and VS Code isolation; behavior tests cover the actual workflows.
 - Use Node's built-in test runner with mocked requests. CI must not require credentials or a running model.
 - Never pass API keys to the Webview or persist them in experiments.
 - Do not treat text differences or literal checks as a verified model-quality score.
 - Cover cancellation, invalid citations, missing evidence, response-order changes, and stale assessments when changing the judge. Model verdicts remain advisory, not verified truth.
 - For live Copilot smoke tests, use a current VS Code release and approved synthetic inputs. Verify consent/model selection, both orders, cancellation, quota errors, and that Chat opens a new draft without submitting. Mocked command calls do not establish live workbench compatibility.
-- Update the README, PLAN, DECISIONS, SKILL, and SHELVED documents when behavior or scope changes.
+- Update the relevant README, user guide, DECISIONS, and SKILL sections when behavior or module ownership changes.
 
 ## Pull requests
 

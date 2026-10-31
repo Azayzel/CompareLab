@@ -1,7 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { selectEvaluator, selectRunModel, resolveRunModels, runWithVsCode, evaluateWithCopilot, openReviewChat, evaluationKey } = require('../src/copilot');
-const { REVIEW_CRITERIA } = require('../src/core');
+const { selectEvaluator, selectRunModel, resolveRunModels } = require('../src/providers/vscode/models');
+const { runWithVsCode } = require('../src/providers/vscode/generation');
+const { evaluateWithCopilot, openReviewChat, evaluationKey } = require('../src/providers/vscode/review');
+const { REVIEW_CRITERIA } = require('../src/comparison/core');
 
 const input = () => ({ prompt: 'Triage these failures.', evidence: 'HTTP 401 responses increased.',
   baseline: { model: 'hidden-model-one', response: 'Roll back.' },

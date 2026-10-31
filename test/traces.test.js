@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { validateTrace, summarizeTrace, importRun } = require('../src/traces');
-const { compare, asMarkdown } = require('../src/core');
+const { validateTrace, summarizeTrace, importRun } = require('../src/records/traces');
+const { compare, asMarkdown } = require('../src/comparison/core');
 
 const hash = 'a'.repeat(64);
 function trace() {

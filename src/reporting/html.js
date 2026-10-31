@@ -1,8 +1,8 @@
 'use strict';
 const { randomBytes } = require('node:crypto');
-const { responseContent } = require('./core');
-const { usageReport } = require('./usage');
-const { promptDecision } = require('./prompt-review');
+const { responseContent } = require('../comparison/response');
+const { usageReport } = require('../metrics/usage');
+const { promptDecision } = require('../comparison/prompt-review');
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, character =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);

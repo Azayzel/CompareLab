@@ -3,9 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { evaluationKey } = require('../src/copilot');
-const { reviewPacket } = require('../src/core');
-const { AGENT_PROMPT } = require('../src/tool-agent');
+const { evaluationKey } = require('../src/providers/vscode/review');
+const { reviewPacket } = require('../src/comparison/core');
+const { AGENT_PROMPT } = require('../src/tools/agent');
 
 function host(overrides = {}, providerOverrides = {}, historyOverrides = {}) {
   const messages = [];
@@ -56,7 +56,9 @@ function host(overrides = {}, providerOverrides = {}, historyOverrides = {}) {
     Uri: { joinPath: (...parts) => parts.join('/') }
   };
   const copilot = {
-    ...require('../src/copilot'),
+    ...require('../src/providers/vscode/models'),
+    ...require('../src/providers/vscode/generation'),
+    ...require('../src/providers/vscode/review'),
     evaluationKey, selectEvaluator: async () => ({ name: 'Reviewer' }), openReviewChat: async () => {},
     evaluateWithCopilot: async (api, input) => {
       evaluations++;
@@ -68,9 +70,9 @@ function host(overrides = {}, providerOverrides = {}, historyOverrides = {}) {
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/extension.js'), 'utf8'), {
     module, Buffer, setTimeout, clearTimeout, AbortController,
-    require: name => name === 'vscode' ? vscode : name === './copilot' ? copilot
-      : name === './providers' ? { ...require('../src/providers'), ...providerOverrides }
-      : name === './history' ? { createHistory: () => history }
+    require: name => name === 'vscode' ? vscode : name.startsWith('./providers/vscode/') ? copilot
+      : name === './providers/http' ? { ...require('../src/providers/http'), ...providerOverrides }
+      : name === './records/history' ? { createHistory: () => history }
       : name.startsWith('./') ? require('../src/' + name.slice(2)) : require(name)
   });
   module.exports.activate({ subscriptions: [], extensionUri: '/extension', globalStorageUri: { fsPath: '/history' }, secrets: { get: async () => undefined } });
@@ -238,7 +240,7 @@ test('live runs and evidence collection exclude unverified tools and recheck sav
     assert.deepEqual(completed.toolSelection, ['read_data']);
     assert.equal(collect ? completed.evidenceCollection.toolPolicy : completed.testRun.plan.toolPolicy,
       'verified-read-only-confirm-every-request');
-    assert.deepEqual(require('../src/orchestration').validateTestRecord(completed.testRun), completed.testRun);
+    assert.deepEqual(require('../src/comparison/orchestration').validateTestRecord(completed.testRun), completed.testRun);
     const callsBefore = requests.length;
     instance.vscode.window.showQuickPick = async () => { certifications++; return []; };
     await instance.send({ type: 'orchestrate', experiment: {
@@ -267,7 +269,7 @@ test('cancelling read-only verification stops before generation and leaves the s
 });
 
 test('imports reject malformed tool selections before they reach the webview', () => {
-  const { compare } = require('../src/core');
+  const { compare } = require('../src/comparison/core');
   for (const names of ['tool_name', null, [{}], ['duplicate', 'duplicate']]) {
     assert.throws(() => compare({ ...experiment(), toolSelection: names }), /Invalid selected tool names/);
   }
@@ -350,7 +352,7 @@ test('history write failures surface explicitly without losing completed test re
 test('a newly activated extension restores an automatically saved test from disk', async t => {
   const root = await fs.promises.mkdtemp(path.join(require('node:os').tmpdir(), 'comparelab-history-host-'));
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
-  const { createHistory } = require('../src/history');
+  const { createHistory } = require('../src/records/history');
   const first = host({}, { runModel: async input => ({ ...input, response: '# Retained report\n\nOriginal evidence-based answer.', elapsedMs: 1 }) },
     createHistory(root));
   await first.send({ type: 'orchestrate', experiment: { ...experiment(), comparisonMode: 'model-prompt-only', test: { repetitions: 1 },
@@ -434,7 +436,7 @@ test('response cards render readable reports with unchanged raw responses and ex
 test('ordinary recommendations highlight only the preferred model and clear stale highlights', () => {
   const input = experiment();
   const panel = webview(input);
-  const result = require('../src/core').compare(input);
+  const result = require('../src/comparison/core').compare(input);
   for (const verdict of ['candidate', 'baseline', 'tie', null]) {
     result.evaluation = verdict ? { verdict, summary: 'Practical recommendation.', model: { name: 'Reviewer', version: 'v1' },
       criteria: [], unknowns: [], judgments: [], inputTokenEstimates: [], note: 'Human verification required.' } : null;
@@ -543,7 +545,7 @@ test('guided prompt drafts require explicit application, preserve original, reje
 });
 
 test('prompt view focuses on edit evidence and only permits adoption for a Better verdict', () => {
-  const { compare } = require('../src/core');
+  const { compare } = require('../src/comparison/core');
   const source = { comparisonKind: 'prompt', comparisonMode: 'model-prompt-only',
     baseline: { provider: 'vscode', model: 'shared', prompt: 'Original instructions', response: 'Original output' },
     candidate: { provider: 'vscode', model: 'shared', prompt: 'Edited instructions', response: 'Edited output' } };
@@ -637,7 +639,7 @@ test('model comparison promotes one run-and-review action and keeps secondary ac
 });
 
 test('prompt diff groups word edits into readable before/after passages with a collapsed full diff', () => {
-  const { compare } = require('../src/core');
+  const { compare } = require('../src/comparison/core');
   for (const edited of ['Keep shared context. Verify facts. Preserve output.', 'Keep shared context. Guess facts. Preserve output.']) {
     const source = { comparisonKind: 'prompt',
       baseline: { prompt: 'Keep shared context. Guess facts. Preserve output.' }, candidate: { prompt: edited } };
@@ -842,7 +844,7 @@ test('shared-evidence prompt tests collect once and replay exact raw results wit
   assert.equal(completed.evidenceCollection.modelRequestCount, 2);
   assert.equal(completed.evidenceCollection.toolCallCount, 1);
   assert.equal(completed.testRun.status, 'completed');
-  const { summarizeTest, validateTestRecord } = require('../src/orchestration');
+  const { summarizeTest, validateTestRecord } = require('../src/comparison/orchestration');
   const summary = summarizeTest(completed.testRun);
   assert.equal(summary.metrics.baseline.inputTokens, 14);
   assert.equal(summary.metrics.candidate.inputTokens, 14);
@@ -1619,14 +1621,14 @@ test('cancelled live tests retain earlier tool activity in history without a suc
   assert.equal(saved.pairs[0].baseline.status, 'cancelled');
   assert.equal(saved.pairs[0].baseline.result.response, '');
   assert.equal(saved.pairs[0].baseline.result.toolEvidence[0].content, 'Retained earlier activity');
-  assert.deepEqual(require('../src/orchestration').validateTestRecord(saved), saved);
+  assert.deepEqual(require('../src/comparison/orchestration').validateTestRecord(saved), saved);
 });
 
 test('analysis and exports show exact screenshot ratios, averages, activity and per-turn Azure scenarios', async () => {
-  const { orchestrateTest, summarizeTest, validateTestRecord } = require('../src/orchestration');
-  const { compare, asMarkdown } = require('../src/core');
-  const { asHtml } = require('../src/html');
-  const { usageTurn } = require('../src/usage');
+  const { orchestrateTest, summarizeTest, validateTestRecord } = require('../src/comparison/orchestration');
+  const { compare, asMarkdown } = require('../src/comparison/core');
+  const { asHtml } = require('../src/reporting/html');
+  const { usageTurn } = require('../src/metrics/usage');
   const input = { ...experiment(), comparisonMode: 'end-to-end', evidence: '', test: { repetitions: 3 },
     baseline: { provider: 'vscode', model: 'gpt-5.6-luna' }, candidate: { provider: 'vscode', model: 'gpt-6.1-sol' } };
   const counts = { baseline: 0, candidate: 0 };

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 const fs = require('node:fs');
-const { compare, asMarkdown } = require('../src/core');
+const { compare, asMarkdown } = require('../src/comparison/core');
 const args = process.argv.slice(2);
 if (args.length < 1 || args.includes('--help')) {
   console.log('Usage: node bin/comparelab.js experiment.json [--format json|md]\nInput: { "prompt": "...", "baseline": {...}, "candidate": {...}, "checks": {"requiredPhrases": [...]}}');

@@ -1,6 +1,6 @@
 'use strict';
-const { isQueryEvidence, validateToolCatalog } = require('./tool-agent');
-const { validateUsageTurns } = require('./usage');
+const { isQueryEvidence, validateToolCatalog } = require('../tools/agent');
+const { validateUsageTurns } = require('../metrics/usage');
 
 function collectionRequest(input) {
   if (!String(input.incomingMessage || '').trim()) {

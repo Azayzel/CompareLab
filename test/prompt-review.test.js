@@ -1,12 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { compare, diffText, changePassages, reviewPacket, parseAssessment, REVIEW_CRITERIA, asMarkdown } = require('../src/core');
-const { evaluateWithCopilot } = require('../src/copilot');
-const { promptDecision } = require('../src/prompt-review');
-const { optimizerRequest, parseOptimizerDraft } = require('../src/prompt-optimizer');
-const { collectionRequest, freezeEvidence } = require('../src/prompt-evidence');
-const { orchestrateTest, summarizeTest, validateTestRecord } = require('../src/orchestration');
-const { asHtml } = require('../src/html');
+const { compare, diffText, changePassages, reviewPacket, parseAssessment, REVIEW_CRITERIA, asMarkdown } = require('../src/comparison/core');
+const { evaluateWithCopilot } = require('../src/providers/vscode/review');
+const { promptDecision } = require('../src/comparison/prompt-review');
+const { optimizerRequest, parseOptimizerDraft } = require('../src/comparison/prompt-optimizer');
+const { collectionRequest, freezeEvidence } = require('../src/comparison/prompt-evidence');
+const { orchestrateTest, summarizeTest, validateTestRecord } = require('../src/comparison/orchestration');
+const { asHtml } = require('../src/reporting/html');
 
 const input = () => ({
   comparisonKind: 'prompt', comparisonMode: 'model-prompt-only', incomingMessage: 'Investigate service:example',
@@ -308,7 +308,7 @@ test('large shared snapshots survive prompt planning, replay and import without 
   assert.deepEqual(seen, [source.evidence, source.evidence]);
   assert.equal(record.plan.evidence, source.evidence);
   assert.deepEqual(validateTestRecord(JSON.parse(JSON.stringify(record))), JSON.parse(JSON.stringify(record)));
-  const { createTestPlan } = require('../src/orchestration');
+  const { createTestPlan } = require('../src/comparison/orchestration');
   assert.throws(() => createTestPlan({ ...source, comparisonKind: 'model', prompt: 'Investigate',
     baseline: { provider: 'vscode', model: 'shared' }, candidate: { provider: 'vscode', model: 'shared' } }), /150,000-character/);
   assert.throws(() => createTestPlan({ ...source,
