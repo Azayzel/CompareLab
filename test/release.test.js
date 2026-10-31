@@ -1,6 +1,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { parseVersion, compareVersions, releasePlan, releaseState } = require('../scripts/release-version');
+
+test('packaging configuration and locked downloads use the public npm registry', () => {
+  const npmrc = fs.readFileSync(path.join(__dirname, '../.npmrc'), 'utf8');
+  const registries = [...npmrc.matchAll(/^\s*(?:@[^:\s]+:)?registry\s*=\s*(\S+)\s*$/gm)].map(match => match[1]);
+  assert.deepEqual(registries, ['https://registry.npmjs.org/']);
+  for (const [name, dependency] of Object.entries(require('../package-lock.json').packages)) {
+    if (dependency.resolved) assert.equal(new URL(dependency.resolved).origin, 'https://registry.npmjs.org', name);
+  }
+});
 
 test('release versions increment the highest stable version numerically', () => {
   assert.equal(releasePlan('0.2.0', [], []).version, '0.2.1');
