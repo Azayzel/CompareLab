@@ -1,4 +1,5 @@
 (() => {
+
   'use strict';
   const vscode = acquireVsCodeApi();
   const $ = id => document.getElementById(id);
@@ -22,10 +23,14 @@
   let reviewCancelling = false;
   let evidenceCollection = null;
   let toolSelection = [];
+
+
   const runMetadata = { a: {}, b: {} };
-  const fields = ['model','prompt','response','provider','endpoint','tokenLimitField','reportedModel','modelVersion','contextWindowTokens','contextWindowSource','inputTokens','outputTokens','maxOutputTokens','finishReason','temperature'];
+  const fields = ['model', 'prompt', 'response', 'provider', 'endpoint', 'tokenLimitField', 'reportedModel', 'modelVersion', 'contextWindowTokens', 'contextWindowSource', 'inputTokens', 'outputTokens', 'maxOutputTokens', 'finishReason', 'temperature'];
   const sharedModelFields = ['model', 'provider', 'endpoint', 'tokenLimitField', 'contextWindowTokens',
     'contextWindowSource', 'maxOutputTokens', 'temperature', 'modelVendor'];
+
+
   const side = prefix => {
     const out = { ...runMetadata[prefix] };
     for (const key of fields) {
@@ -34,6 +39,8 @@
     }
     return out;
   };
+
+
   const experiment = () => {
     const baseline = side('a');
     const candidate = side('b');
@@ -47,22 +54,28 @@
       review: { checkOrder: $('checkOrder').checked },
       test: { repetitions: Number($('testRepetitions').value || 3) }, testRun,
       checks: { requiredPhrases: $('checks').value.split(',').map(x => x.trim()).filter(Boolean) },
-      ...(comparisonKind === 'prompt' ? { optimizer: {
-        goal: $('optimizerGoal').value, preserve: $('optimizerPreserve').value, success: $('optimizerSuccess').value,
-        draft: optimizerDraft ? { ...optimizerDraft, prompt: $('optimizerDraft').value } : null
-      } } : {})
+      ...(comparisonKind === 'prompt' ? {
+        optimizer: {
+          goal: $('optimizerGoal').value, preserve: $('optimizerPreserve').value, success: $('optimizerSuccess').value,
+          draft: optimizerDraft ? { ...optimizerDraft, prompt: $('optimizerDraft').value } : null
+        }
+      } : {})
     };
   };
+
   const save = () => {
     const data = experiment();
     comparisonDrafts[comparisonKind] = data;
     vscode.setState({ ...data, comparisonDrafts });
   };
+
   const post = (type, extra = {}) => {
     save();
     vscode.postMessage({ type, experiment: experiment(), revision, ...extra });
   };
+
   const fill = (id, value) => { if ($(id)) $(id).value = value ?? ''; };
+
   function restore(data) {
     if (!data || typeof data !== 'object') return;
     comparisonKind = data.comparisonKind === 'prompt' ? 'prompt' : 'model';
@@ -76,22 +89,28 @@
     fill('optimizerDraft', optimizerDraft?.prompt);
     $('optimizerPreview').hidden = !optimizerDraft;
     $('optimizerSummary').textContent = optimizerDraft?.summary || '';
+
     if (data.comparisonDrafts && typeof data.comparisonDrafts === 'object') comparisonDrafts = data.comparisonDrafts;
+
     fill('prompt', data.prompt);
     fill('incomingMessage', data.incomingMessage);
     fill('evidence', data.evidence);
     fill('comparisonMode', data.comparisonMode || 'end-to-end');
     $('checkOrder').checked = data.review?.checkOrder !== false;
     fill('testRepetitions', data.test?.repetitions ?? 3);
+
     const defaults = { provider: 'vscode', tokenLimitField: 'max_completion_tokens', contextWindowSource: 'unverified' };
+
     for (const [prefix, variant] of [['a', data.baseline], ['b', data.candidate]]) {
       for (const key of fields) fill(prefix + '-' + key, variant?.[key] ?? defaults[key] ?? '');
-      runMetadata[prefix] = { elapsedMs: variant?.elapsedMs ?? null, runId: variant?.runId ?? null,
+      runMetadata[prefix] = {
+        elapsedMs: variant?.elapsedMs ?? null, runId: variant?.runId ?? null,
         modelVendor: variant?.modelVendor, estimatedInputTokens: variant?.estimatedInputTokens ?? null,
         estimatedOutputTokens: variant?.estimatedOutputTokens ?? null,
         usageTurns: variant?.usageTurns ?? null,
         responseRedacted: variant?.responseRedacted === true, responseTruncated: variant?.responseTruncated === true,
-        executionTrace: variant?.executionTrace ?? null };
+        executionTrace: variant?.executionTrace ?? null
+      };
     }
     fill('checks', Array.isArray(data.checks?.requiredPhrases) ? data.checks.requiredPhrases.filter(value => typeof value === 'string').join(', ') : '');
     invalidate();
@@ -235,10 +254,12 @@
       const current = experiment();
       comparisonDrafts[comparisonKind] = current;
       const variant = { ...Object.fromEntries(sharedModelFields.map(key => [key, current.baseline[key]])), response: '' };
-      const initial = nextKind === 'prompt' ? { ...current, prompt: '',
+      const initial = nextKind === 'prompt' ? {
+        ...current, prompt: '',
         baseline: { ...variant, prompt: current.baseline.prompt || current.prompt },
         candidate: { ...variant, prompt: current.baseline.prompt || current.prompt }, comparisonMode: 'model-prompt-only',
-        test: { repetitions: 1 }, optimizer: null, evidenceCollection: null }
+        test: { repetitions: 1 }, optimizer: null, evidenceCollection: null
+      }
         : { ...current, prompt: current.baseline.prompt || current.prompt, baseline: variant, candidate: { ...variant } };
       restore(comparisonDrafts[nextKind] || { ...initial, comparisonKind: nextKind, testRun: null });
       save();
@@ -304,9 +325,11 @@
     return element;
   }
   function badge(status, limited = false) {
-    const labels = { succeeded: 'Response ready', failed: 'Failed', running: 'Running', 'not-started': 'Not started',
+    const labels = {
+      succeeded: 'Response ready', failed: 'Failed', running: 'Running', 'not-started': 'Not started',
       completed: 'Complete', 'completed-limited': 'Finished with limits', partial: 'Needs attention', cancelled: 'Cancelled', 'not-reviewed': 'Not reviewed',
-      reviewed: 'Reviewed', saved: 'Saved', draft: 'Draft · not reviewed', unreadable: 'Unreadable', 'review-failed': 'Review failed', 'review-running': 'Review running', 'review-cancelled': 'Review cancelled' };
+      reviewed: 'Reviewed', saved: 'Saved', draft: 'Draft · not reviewed', unreadable: 'Unreadable', 'review-failed': 'Review failed', 'review-running': 'Review running', 'review-cancelled': 'Review cancelled'
+    };
     return make('span', limited ? 'Budget-limited' : labels[status] || status, 'status-badge status-' + (limited ? 'limited' : status));
   }
   function metric(label, value, hint) {
@@ -328,8 +351,8 @@
       metrics?.outputTokens == null && metrics?.estimatedOutputTokens != null;
     return metric(title, format(metrics?.inputTokens, metrics?.estimatedInputTokens) + ' / ' +
       format(metrics?.outputTokens, metrics?.estimatedOutputTokens),
-    hint ?? (estimated ? '~ Model-counted estimate; not billed usage. Includes all model turns and tool-call output; excludes hidden reasoning.'
-      : 'Actual provider usage across all model turns'));
+      hint ?? (estimated ? '~ Model-counted estimate; not billed usage. Includes all model turns and tool-call output; excludes hidden reasoning.'
+        : 'Actual provider usage across all model turns'));
   }
   function readableTime(value) {
     return Number.isFinite(value) ? (value < 1000 ? value + ' ms' : (value / 1000).toFixed(1) + ' s') : 'Not available';
@@ -384,8 +407,10 @@
   function updateReviewProgress(phase, record = null) {
     reviewPhase = phase;
     if (!promptReviewRunning) return;
-    const titles = { prepare: 'Preparing prompt review', evidence: 'Collecting shared tool evidence',
-      original: 'Running original prompt', edited: 'Running edited prompt', review: 'Reviewing both outputs' };
+    const titles = {
+      prepare: 'Preparing prompt review', evidence: 'Collecting shared tool evidence',
+      original: 'Running original prompt', edited: 'Running edited prompt', review: 'Reviewing both outputs'
+    };
     const pair = record?.pairs.at(-1);
     $('reviewProgressTitle').textContent = reviewCancelling ? 'Cancelling review...' : titles[phase];
     if (pair) $('reviewProgressTitle').textContent += ' · Run ' + pair.number + ' of ' + record.plan.repetitions;
@@ -450,13 +475,13 @@
     const heading = make('div', '', 'analysis-heading');
     const title = record.status === 'running' ? 'Investigations in progress' : !reviewed ? 'No completed comparison yet'
       : summary?.preference === 'baseline' ? 'Baseline preferred for this task'
-      : summary?.preference === 'candidate' ? 'Candidate preferred for this task' : 'Investigation results';
+        : summary?.preference === 'candidate' ? 'Candidate preferred for this task' : 'Investigation results';
     heading.append(make('h2', title), badge(record.status === 'completed' && limited ? 'completed-limited' : record.status));
     hero.append(make('p', 'ANALYSIS OVERVIEW', 'eyebrow'), heading,
       make('p', !reviewed ? 'A comparison needs a response from both models and a completed review. You can still read any available responses below.'
         : record.plan.comparisonMode === 'end-to-end' ? 'These models investigated independently. Different evidence means this is not a controlled model-quality ranking.'
-        : summary?.preference === 'inconclusive' ? 'No clear preference emerged. Read the reports and evaluation to compare their strengths and gaps.'
-        : 'Review the model reports below. Each run keeps its evidence, limitations, and evaluation details.', 'overview-description'));
+          : summary?.preference === 'inconclusive' ? 'No clear preference emerged. Read the reports and evaluation to compare their strengths and gaps.'
+            : 'Review the model reports below. Each run keeps its evidence, limitations, and evaluation details.', 'overview-description'));
     const totals = make('div', '', 'overview-metrics');
     totals.append(metric('Pairs reviewed', reviewed + ' / ' + record.plan.repetitions),
       metric('Responses received', succeeded + ' / ' + record.plan.repetitions * 2),
@@ -560,10 +585,14 @@
     notes.appendChild(packet);
     container.appendChild(notes);
   }
-  const verdictLabel = verdict => ({ baseline: 'Baseline better', candidate: 'Candidate better', tie: 'Tie',
-    insufficient_evidence: 'Insufficient evidence' })[verdict] || 'Not evaluated';
-  const criterionLabel = criterion => ({ grounding: 'Evidence grounding', reasoning: 'Diagnostic reasoning',
-    completeness: 'Completeness', actionability: 'Actionability and safety', uncertainty: 'Uncertainty', clarity: 'Clarity' })[criterion] || criterion;
+  const verdictLabel = verdict => ({
+    baseline: 'Baseline better', candidate: 'Candidate better', tie: 'Tie',
+    insufficient_evidence: 'Insufficient evidence'
+  })[verdict] || 'Not evaluated';
+  const criterionLabel = criterion => ({
+    grounding: 'Evidence grounding', reasoning: 'Diagnostic reasoning',
+    completeness: 'Completeness', actionability: 'Actionability and safety', uncertainty: 'Uncertainty', clarity: 'Clarity'
+  })[criterion] || criterion;
   function renderCriteria(container, criteria) {
     for (const item of criteria) {
       const row = make('div', '', 'criterion');
@@ -575,8 +604,10 @@
         quotes.appendChild(make('summary', 'Source quotes (' + item.citations.length + ')'));
         for (const citation of item.citations) {
           const quote = make('blockquote', '');
-          const label = { baseline: 'Baseline', candidate: 'Candidate', evidence: 'Source evidence',
-            baselineTask: 'Baseline task', candidateTask: 'Candidate task' }[citation.source] || citation.source;
+          const label = {
+            baseline: 'Baseline', candidate: 'Candidate', evidence: 'Source evidence',
+            baselineTask: 'Baseline task', candidateTask: 'Candidate task'
+          }[citation.source] || citation.source;
           quote.append(make('strong', label), make('p', citation.quote));
           quotes.appendChild(quote);
         }
@@ -628,10 +659,10 @@
     for (const heading of ['Recorded measure', 'Baseline', 'Candidate']) headings.appendChild(make('th', heading));
     table.appendChild(headings);
     const measures = [['Model', 'model'], ['Latency (ms; full attempt for agent traces)', 'elapsedMs'],
-      ['Input tokens (estimated; VS Code)', 'estimatedInputTokens'],
-      ['Output tokens (estimated; VS Code, visible text and tool calls)', 'estimatedOutputTokens'],
-      ['Input tokens (last returned model call for agent traces)', 'inputTokens'],
-      ['Output tokens (last returned model call for agent traces)', 'outputTokens'], ['Output token cap', 'maxOutputTokens']];
+    ['Input tokens (estimated; VS Code)', 'estimatedInputTokens'],
+    ['Output tokens (estimated; VS Code, visible text and tool calls)', 'estimatedOutputTokens'],
+    ['Input tokens (last returned model call for agent traces)', 'inputTokens'],
+    ['Output tokens (last returned model call for agent traces)', 'outputTokens'], ['Output token cap', 'maxOutputTokens']];
     for (const [label, key] of measures) {
       const row = make('tr', '');
       row.append(make('th', label), make('td', result.baseline[key] ?? 'Unknown'), make('td', result.candidate[key] ?? 'Unknown'));
@@ -757,8 +788,10 @@
       quotes.appendChild(make('summary', 'See the prompt edit and output evidence'));
       for (const citation of change.citations) {
         const quote = make('blockquote', '');
-        quote.append(make('strong', ({ baselinePrompt: 'Original prompt', candidatePrompt: 'Edited prompt',
-          baselineTask: 'Original task', candidateTask: 'Edited task', baseline: 'Original output', candidate: 'Edited output' })[citation.source]),
+        quote.append(make('strong', ({
+          baselinePrompt: 'Original prompt', candidatePrompt: 'Edited prompt',
+          baselineTask: 'Original task', candidateTask: 'Edited task', baseline: 'Original output', candidate: 'Edited output'
+        })[citation.source]),
           make('pre', citation.quote, 'response-content'));
         quotes.appendChild(quote);
       }
@@ -817,10 +850,12 @@
   }
   function applyRun(side, result) {
     invalidate();
-    runMetadata[side] = { elapsedMs: result.elapsedMs, runId: result.runId, modelVendor: result.modelVendor,
-      estimatedInputTokens: result.estimatedInputTokens, estimatedOutputTokens: result.estimatedOutputTokens, usageTurns: result.usageTurns };
-    const keys = ['model','provider','reportedModel','modelVersion','response','contextWindowTokens','contextWindowSource',
-      'inputTokens','outputTokens','maxOutputTokens','finishReason','temperature'];
+    runMetadata[side] = {
+      elapsedMs: result.elapsedMs, runId: result.runId, modelVendor: result.modelVendor,
+      estimatedInputTokens: result.estimatedInputTokens, estimatedOutputTokens: result.estimatedOutputTokens, usageTurns: result.usageTurns
+    };
+    const keys = ['model', 'provider', 'reportedModel', 'modelVersion', 'response', 'contextWindowTokens', 'contextWindowSource',
+      'inputTokens', 'outputTokens', 'maxOutputTokens', 'finishReason', 'temperature'];
     for (const key of keys) fill(side + '-' + key, result[key]);
     // Provider-generated answers are pinned to their actual prompt to keep exported experiments reproducible.
     fill(side + '-prompt', result.promptTemplate ?? result.prompt);
@@ -907,8 +942,8 @@
       if (promptReviewRunning) $('reviewProgressDetail').textContent = msg.message;
       save();
     }
-    if (msg.type === 'runResult' && ['a','b'].includes(msg.side)) applyRun(msg.side, msg.result);
-    if (msg.type === 'runStatus' && ['a','b'].includes(msg.side)) $(msg.side + '-status').textContent = msg.message;
+    if (msg.type === 'runResult' && ['a', 'b'].includes(msg.side)) applyRun(msg.side, msg.result);
+    if (msg.type === 'runStatus' && ['a', 'b'].includes(msg.side)) $(msg.side + '-status').textContent = msg.message;
     if (msg.type === 'reviewStatus') {
       $('reviewStatus').textContent = msg.message;
       if (promptReviewRunning) {
@@ -935,7 +970,7 @@
       if (busy && msg.kind === 'evaluation') renderEvaluation(null);
       if (busy && msg.kind === 'test') invalidate();
       setPromptReviewRunning(busy && msg.kind === 'test' && comparisonKind === 'prompt');
-      for (const side of ['a','b']) updateRunner(side);
+      for (const side of ['a', 'b']) updateRunner(side);
       updateHistoryControls();
     }
   });
@@ -1000,7 +1035,7 @@
   });
   $('loadInstructions').addEventListener('click', () => post('loadInstructions'));
   $('selectTools').addEventListener('click', () => post('selectTools'));
-  for (const side of ['a','b']) {
+  for (const side of ['a', 'b']) {
     $(side + '-loadInstructions').addEventListener('click', () => post('loadInstructions', { side }));
     $(side + '-selectModel').addEventListener('click', () => post('selectModel', { side }));
     $(side + '-run').addEventListener('click', () => post('run', { side }));
@@ -1031,7 +1066,7 @@
   restore(vscode.getState());
   updateToolSummary();
   updateComparisonLayout();
-  for (const side of ['a','b']) updateRunner(side);
+  for (const side of ['a', 'b']) updateRunner(side);
   updateHistoryControls();
   if (comparisonKind === 'prompt' || $('a-response').value || $('b-response').value) post('compare');
 })();

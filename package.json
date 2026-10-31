@@ -1,9 +1,10 @@
 {
   "name": "comparelab",
   "displayName": "CompareLab",
+  "icon": "media/comparelab-icon.png",
   "description": "Compare AI models and prompt variants in VS Code with inline diffs, controlled evaluations, and local-first Ollama/OpenAI-compatible runners.",
   "version": "0.2.0",
-  "publisher": "Josh Lavely",
+  "publisher": "azayzel",
   "private": false,
   "license": "MIT",
   "repository": {
@@ -21,13 +22,37 @@
     "Machine Learning"
   ],
   "activationEvents": [
-    "onCommand:comparelab.open"
+    "onCommand:comparelab.open",
+    "onView:comparelab.launcher"
   ],
   "contributes": {
     "commands": [
       {
         "command": "comparelab.open",
         "title": "CompareLab: Compare Model Outputs"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "comparelab",
+          "title": "CompareLab",
+          "icon": "media/comparelab.svg"
+        }
+      ]
+    },
+    "views": {
+      "comparelab": [
+        {
+          "id": "comparelab.launcher",
+          "name": "CompareLab"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "comparelab.launcher",
+        "contents": "Compare models or test a prompt change.\n[Open CompareLab](command:comparelab.open)\nReports open side by side in the editor."
       }
     ]
   },
@@ -36,6 +61,14 @@
     "build": "node scripts/build.js && npm test",
     "vscode:prepublish": "npm run build",
     "compare": "node bin/comparelab.js",
-    "package": "npx --yes @vscode/vsce package --no-dependencies --out dist/comparelab.vsix"
+    "package": "vsce package --no-dependencies --out dist/comparelab.vsix"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "4.1.0"
+  },
+  "overrides": {
+    "@vscode/vsce": {
+      "minimatch": "11.0.1"
+    }
   }
 }

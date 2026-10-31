@@ -42,7 +42,9 @@ See [module ownership](CONTRIBUTING.md#code-boundaries) for the source layout an
 | **Separate fresh Chat draft** | Allows interactive investigation with available tools | Workbench-command compatibility needs testing; no automatic submission or answer capture |
 | **Assessment bound to source inputs** | Prevent stale results from being attributed to changed evidence/responses | Edits invalidate attached results; history retains saved reviews and orchestrated JSON retains per-pair assessments |
 | **Local history and portable exports** | Reopen comparisons without rerunning models; share JSON, Markdown, or self-contained HTML | History is unencrypted; prompts, responses, and tool evidence require review before sharing |
-| **Advisory CI, not a release gate** | Passive measurement consistent with original comparison skill | No automated promotion/blocking decisions |
+| **Build/test-gated releases on main** | Publish a tested VSIX after each merge without version-bump commits | Release tags allocate patch versions; failed publishing leaves a resumable draft; AI comparison verdicts remain advisory |
+| **Marketplace trusted publishing** | Avoid long-lived publishing credentials | Requires an OIDC trust policy bound to the repository, release workflow, and main-only GitHub environment |
+| **Sidebar launcher and shared artwork** | Make CompareLab discoverable without squeezing reports into a sidebar | Activity Bar uses the SVG; Marketplace uses a PNG export; both launch paths use the existing editor command |
 
 ## Current comparability rules
 

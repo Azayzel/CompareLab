@@ -23,6 +23,10 @@ const secretId = endpoint => 'comparelab:key:' + crypto.createHash('sha256').upd
 
 function activate(context) {
   const history = createHistory(path.join(context.globalStorageUri.fsPath, 'comparison-history'));
+  context.subscriptions.push(vscode.window.registerTreeDataProvider('comparelab.launcher', {
+    getChildren: () => [],
+    getTreeItem: item => item
+  }));
   context.subscriptions.push(vscode.commands.registerCommand('comparelab.open', () => {
     const panel = vscode.window.createWebviewPanel('comparelab', 'CompareLab', vscode.ViewColumn.One, {
       enableScripts: true, retainContextWhenHidden: true,
