@@ -594,8 +594,8 @@
       if (pair.evaluation) {
         detail.appendChild(make('p', pair.evaluation.summary, 'assessment-summary'));
         renderCriteria(detail, pair.evaluation.criteria);
-        renderReviewEvidence(detail, pair.evaluation);
       }
+      renderReviewEvidence(detail, pair.evaluation || { verification: pair.verification });
       if (pair.evaluationError) detail.appendChild(make('p', pair.evaluationError, 'notice'));
       for (const check of decision?.checks || []) detail.appendChild(make('p', check.phrase + ': baseline ' + (check.baseline ? 'Pass' : 'Fail') + ', candidate ' + (check.candidate ? 'Pass' : 'Fail')));
       container.appendChild(detail);

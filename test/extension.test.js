@@ -472,6 +472,24 @@ test('response cards render readable reports with unchanged raw responses and ex
   assert.ok(instance.markup.indexOf('media/markdown.js') < instance.markup.indexOf('media/app.js'));
 });
 
+test('test history renders retained verification when its evaluator fails', () => {
+  const panel = webview(experiment());
+  const record = { id: 'partial-check', status: 'partial', plan: { repetitions: 1, baseline: { model: 'one' },
+    candidate: { model: 'two' }, comparisonMode: 'model-prompt-only', parallel: false },
+  pairs: [{ number: 1, order: ['baseline', 'candidate'],
+    baseline: { status: 'succeeded', result: { response: 'First answer.' } },
+    candidate: { status: 'succeeded', result: { response: 'Second answer.' } },
+    evaluationStatus: 'failed', evaluation: null, evaluationError: 'Evaluator unavailable.',
+    verification: { baseline: { status: 'passed', detail: 'One check passed.' },
+      candidate: { status: 'failed', detail: 'Expected 42.' } } }] };
+  panel.receive({ type: 'testUpdate', record, summary: { preference: 'inconclusive', metrics: {},
+    pairDecisions: [], warnings: [] }, message: 'Review failed.' });
+  const text = visibleText(panel.field('testResults'));
+  assert.match(text, /Executable check observations/);
+  assert.match(text, /One check passed/);
+  assert.match(text, /Expected 42/);
+});
+
 test('ordinary recommendations highlight only the preferred model and clear stale highlights', () => {
   const input = experiment();
   const panel = webview(input);

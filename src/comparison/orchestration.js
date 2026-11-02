@@ -288,7 +288,15 @@ async function orchestrateTest(input, { runVariant, evaluatePair, comparePair, s
     } catch (error) {
       pair.evaluationStatus = cancelled() ? 'cancelled' : 'failed';
       pair.evaluationError = String(error.message || error).slice(0, 500);
-      if (error.partialVerification) pair.verification = error.partialVerification;
+      if (error.partialVerification) {
+        pair.verification = error.partialVerification;
+        if (Buffer.byteLength(JSON.stringify(record), 'utf8') > MAX_RECORD_BYTES - 65536) {
+          delete pair.verification;
+          storageFull = true;
+          pair.evaluationError = (pair.evaluationError.slice(0, 350) +
+            ' Executable check observations exceeded the test record storage limit and were omitted.').slice(0, 500);
+        }
+      }
     }
     await publish();
   }

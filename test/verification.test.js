@@ -2,6 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
+const path = require('node:path');
 const { extractModule, validateVerification } = require('../src/comparison/verification');
 const { prepareVerification, verifyPair, passingReport } = require('../src/providers/verification');
 
@@ -39,7 +40,7 @@ test('Docker must be ready with a local resolved image; no automatic download or
 });
 
 test('each output uses a separate restricted container and cleanup runs after success or failure', async () => {
-  const calls = [], directories = [];
+  const calls = [], directories = [], stagingDirectories = [];
   const result = await verifyPair(pair(), image, { run: async args => {
     calls.push(args);
     if (args[0] === 'rm') return { code: 0, output: '' };
@@ -49,6 +50,11 @@ test('each output uses a separate restricted container and cleanup runs after su
     const mount = args[args.indexOf('--mount') + 1];
     const directory = mount.match(/src=([^,]+)/)[1];
     directories.push(directory);
+    const stagingDirectory = path.dirname(directory);
+    stagingDirectories.push(stagingDirectory);
+    assert.equal(path.basename(directory), 'work');
+    assert.equal((await fs.stat(stagingDirectory)).mode & 0o777, 0o700);
+    assert.equal((await fs.stat(directory)).mode & 0o777, 0o755);
     assert.deepEqual((await fs.readdir(directory)).sort(), ['checker.cjs', 'harness.cjs', 'solution.cjs']);
     for (const file of ['checker.cjs', 'harness.cjs', 'solution.cjs']) {
       assert.equal((await fs.stat(directory + '/' + file)).mode & 0o777, 0o644);
@@ -60,6 +66,7 @@ test('each output uses a separate restricted container and cleanup runs after su
   assert.notEqual(directories[0], directories[1]);
   assert.equal(calls.filter(args => args[0] === 'rm').length, 2);
   for (const directory of directories) await assert.rejects(fs.stat(directory), { code: 'ENOENT' });
+  for (const directory of stagingDirectories) await assert.rejects(fs.stat(directory), { code: 'ENOENT' });
   let removed = 0;
   const failed = await verifyPair(pair(), image, { run: async args => {
     if (args[0] === 'rm') { removed++; return { code: 0, output: '' }; }

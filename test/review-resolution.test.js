@@ -148,6 +148,32 @@ test('completed verification survives an evaluator failure in the saved pair', a
   assert.deepEqual(saved.pairs[0].verification, pair.verification);
 });
 
+test('oversized verification observations are omitted and stop later pairs', async () => {
+  const input = { ...source(), verification: { kind: 'node-commonjs', name: 'checker.cjs',
+    source: 'trusted checker', timeoutSeconds: 30 }, test: { repetitions: 2 } };
+  let generated = 0;
+  const record = await orchestrateTest(input, {
+    comparePair: () => ({ checks: [], fairness: { warnings: [], unknowns: [] } }),
+    runVariant: async (request, side) => {
+      generated++;
+      return { ...request, response: 'x'.repeat(4_100_000) };
+    },
+    evaluatePair: async pair => {
+      const observation = side => ({ status: 'failed',
+        responseHash: digest(pair[side].response), detail: 'x'.repeat(65536) });
+      const error = new Error('Evaluator quota exceeded');
+      error.partialVerification = { image: 'sha256:' + 'c'.repeat(64),
+        checkerHash: digest(input.verification.source), baseline: observation('baseline'), candidate: observation('candidate') };
+      throw error;
+    }
+  });
+  assert.equal(generated, 2);
+  assert.equal(record.pairs.length, 1);
+  assert.equal(record.pairs[0].verification, undefined);
+  assert.match(record.pairs[0].evaluationError, /observations exceeded.*omitted/);
+  assert.deepEqual(validateTestRecord(JSON.parse(JSON.stringify(record))), JSON.parse(JSON.stringify(record)));
+});
+
 test('Markdown reports aggregate confidence separately from the last pair assessment', async () => {
   const input = { ...source(), review: { decisionPolicy: 'best-supported' }, test: { repetitions: 3 } };
   let review = 0;

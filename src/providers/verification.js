@@ -77,20 +77,22 @@ async function verifyPair(input, image, { signal, run = command } = {}) {
     try { source = extractModule(response); }
     catch (error) { result[side] = { status: 'failed', responseHash, detail: error.message }; continue; }
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'comparelab-check-'));
+    const workDirectory = path.join(directory, 'work');
     const name = 'comparelab-check-' + randomUUID();
     const started = Date.now();
     try {
-      await fs.writeFile(path.join(directory, 'solution.cjs'), source);
-      await fs.writeFile(path.join(directory, 'checker.cjs'), config.source);
-      await fs.writeFile(path.join(directory, 'harness.cjs'),
+      await fs.mkdir(workDirectory, { mode: 0o755 });
+      await fs.chmod(workDirectory, 0o755);
+      await fs.writeFile(path.join(workDirectory, 'solution.cjs'), source);
+      await fs.writeFile(path.join(workDirectory, 'checker.cjs'), config.source);
+      await fs.writeFile(path.join(workDirectory, 'harness.cjs'),
         "process.argv = [process.execPath, '/work/checker.cjs', '/work/solution.cjs'];\nrequire('/work/checker.cjs');\n");
-      await fs.chmod(directory, 0o755);
       await Promise.all(['solution.cjs', 'checker.cjs', 'harness.cjs'].map(file =>
-        fs.chmod(path.join(directory, file), 0o644)));
+        fs.chmod(path.join(workDirectory, file), 0o644)));
       const observed = await run(['run', '--name', name, '--pull=never', '--network=none', '--read-only',
         '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user=65534:65534', '--cpus=1',
         '--memory=256m', '--memory-swap=256m', '--pids-limit=64', '--ulimit', 'nofile=128:128',
-        '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m', '--mount', 'type=bind,src=' + directory + ',dst=/work,readonly',
+        '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m', '--mount', 'type=bind,src=' + workDirectory + ',dst=/work,readonly',
         '--workdir=/work', image, 'node', '--test', '--test-reporter=tap', '/work/harness.cjs'],
       { timeout: config.timeoutSeconds * 1000, signal });
       result[side] = { ...passingReport(observed.output, observed.code), responseHash,
