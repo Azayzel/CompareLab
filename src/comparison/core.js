@@ -449,6 +449,8 @@ function asMarkdown(result) {
     const summary = summarizeTest(test);
     lines.push('## Orchestrated test', '', 'Status: ' + test.status + '. ID: ' + escapeMd(test.id) + '.', '',
       'Task-specific preference: **' + summary.preference + '**. Planned paired runs: ' + test.plan.repetitions + '.',
+      'Aggregate recommendation confidence: **' + summary.confidence + '**. ' +
+      (summary.confidence === 'low' ? 'Provisional pick, not a proven improvement.' : 'Not statistical confidence.'),
       summary.requiredCheckCount ? 'Acceptance: baseline passed required checks in ' + summary.acceptance.baseline.passed + '/' + summary.acceptance.baseline.total +
       ' successful responses; candidate ' + summary.acceptance.candidate.passed + '/' + summary.acceptance.candidate.total + '.'
         : 'No required checks configured; correctness is not independently verified.',

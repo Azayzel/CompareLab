@@ -85,6 +85,8 @@ async function verifyPair(input, image, { signal, run = command } = {}) {
       await fs.writeFile(path.join(directory, 'harness.cjs'),
         "process.argv = [process.execPath, '/work/checker.cjs', '/work/solution.cjs'];\nrequire('/work/checker.cjs');\n");
       await fs.chmod(directory, 0o755);
+      await Promise.all(['solution.cjs', 'checker.cjs', 'harness.cjs'].map(file =>
+        fs.chmod(path.join(directory, file), 0o644)));
       const observed = await run(['run', '--name', name, '--pull=never', '--network=none', '--read-only',
         '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user=65534:65534', '--cpus=1',
         '--memory=256m', '--memory-swap=256m', '--pids-limit=64', '--ulimit', 'nofile=128:128',

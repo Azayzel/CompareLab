@@ -44,8 +44,9 @@ function usage(report) {
     .join('')}</tbody></table></div>`);
 }
 
-function assessment(value, decision) {
-  if (!value) return '<p class="notice">No completed quality review. Text differences do not establish a winner.</p>';
+function assessment(value, decision, verification) {
+  if (!value) return '<p class="notice">No completed quality review. Text differences do not establish a winner.</p>' +
+    (verification ? details('Executable check observations', raw(JSON.stringify(verification, null, 2))) : '');
   const verdict = decision?.preference ? 'Recommend ' + label(decision.preference) : 'No supported recommendation';
   return `<div class="review-heading"><h3 class="verdict">${verdict}</h3>
     <span class="notice">Evaluator: ${escape(value.model?.name || value.model?.id || 'Unknown')}</span></div>
@@ -59,7 +60,7 @@ function assessment(value, decision) {
       <p>${escape(item.rationale)}</p>${details('Source citations', (item.citations || []).map(citation =>
     `<blockquote><strong>${escape(citation.source)}</strong><p>${escape(citation.quote)}</p></blockquote>`).join(''))}</section>`).join('')}
     ${(value.unknowns || []).length ? details('Remaining unknowns', '<ul>' + value.unknowns.map(item => `<li>${escape(item)}</li>`).join('') + '</ul>') : ''}
-    ${value.verification ? details('Executable check observations', raw(JSON.stringify(value.verification, null, 2))) : ''}
+    ${value.verification || verification ? details('Executable check observations', raw(JSON.stringify(value.verification || verification, null, 2))) : ''}
     ${value.resolution ? details('Evidence resolution audit', raw(JSON.stringify(value.resolution, null, 2))) : ''}
     ${details('Evaluator usage (separate)', usage(usageReport(value.usageTurns || [])))}`;
 }
@@ -67,24 +68,27 @@ function assessment(value, decision) {
 function asHtml(result, { css, markdownScript, logoPng }) {
   const nonce = randomBytes(18).toString('base64');
   const markdown = [];
-  const preferredBadge = result.testSummary?.confidence === 'low' || comparisonDecision(result).status === 'provisional'
-    ? preferred.replace('Preferred', 'Provisional pick') : preferred;
+  const test = result.testRun;
+  const summary = result.testSummary;
+  const decision = comparisonDecision(result);
+  const preferredBadge = (recommendation, aggregate = false) => {
+    if (!recommendation?.preference) return '';
+    return (aggregate && test ? summary?.confidence === 'low' : recommendation.status === 'provisional')
+      ? preferred.replace('Preferred', 'Provisional pick') : preferred;
+  };
   const formatted = value => {
     const text = responseContent(value);
     const index = markdown.push(text) - 1;
     return `<div class="markdown-body" data-markdown="${index}">${raw(text)}</div>`;
   };
-  const response = (side, value, status, winner, error) => `<article class="response-card${winner === side ? ' model-preferred' : ''}">
-    <div class="model-card-heading"><h3>${escape(value?.model || result[side].model || 'Unspecified model')}</h3><span>${winner === side ? preferredBadge : ''}
+  const response = (side, value, status, winner, error, badge = preferredBadge(decision)) => `<article class="response-card${winner === side ? ' model-preferred' : ''}">
+    <div class="model-card-heading"><h3>${escape(value?.model || result[side].model || 'Unspecified model')}</h3><span>${winner === side ? badge : ''}
     <span class="status-badge">${escape(status)}</span></span></div><p class="model-role">${label(side)}${result.comparisonKind === 'prompt' ? ' prompt' : ''}</p>
     ${tokens(value)}<div class="response-view">${value?.response ? formatted(value.response) : `<p class="warning-callout">${escape(error || 'No response available.')}</p>`}</div>
     ${value?.response ? details('Raw response', raw(value.response)) : ''}
     ${value?.toolEvidence ? details('Tool requests and full returned results', raw(JSON.stringify(value.toolEvidence, null, 2))) : ''}
     ${value?.investigationBudget?.limited ? `<p class="warning-callout">Historical budget-limited investigation: ${escape(value.investigationBudget.reasons.join(' '))}</p>` : ''}
     </article>`;
-  const test = result.testRun;
-  const summary = result.testSummary;
-  const decision = comparisonDecision(result);
   const winner = test ? summary?.preference : decision.preference;
   const hasWinner = ['baseline', 'candidate'].includes(winner);
   const kind = result.comparisonKind === 'prompt' ? 'Prompt comparison' : 'Model comparison';
@@ -93,7 +97,8 @@ function asHtml(result, { css, markdownScript, logoPng }) {
     const metrics = summary?.metrics[side] || result[side];
     const latency = metrics.medianLatencyMs ?? metrics.elapsedMs;
     return `<article class="model-summary-card${winner === side ? ' model-preferred' : ''}">
-      <div class="model-card-heading"><h3>${escape(result[side].model || 'Unspecified model')}</h3>${winner === side ? preferredBadge : ''}</div>
+      <div class="model-card-heading"><h3>${escape(result[side].model || 'Unspecified model')}</h3>${winner === side ? preferredBadge(
+        test ? { preference: winner } : decision, true) : ''}</div>
       <p class="model-role">${label(side)}${result.comparisonKind === 'prompt' ? ' prompt' : ''}</p><div class="model-metrics">
       ${metric(test ? 'Responses' : 'Response', test ? metrics.succeeded + ' / ' + test.plan.repetitions
     : result[side].response ? 'Available' : 'Missing')}
@@ -117,14 +122,15 @@ function asHtml(result, { css, markdownScript, logoPng }) {
     <h2>Run ${pair.number}</h2><span class="status-badge">${escape(pair.evaluationStatus)}</span></div>
     <p class="notice">${test.plan.parallel ? 'Simultaneous generation (launch order)' : 'Generation order'}: ${escape(pair.order.join(' then '))}</p>
     <div class="readable-responses">${['baseline', 'candidate'].map(side => response(side, pair[side].result, pair[side].status,
-    decision.preference, pair[side].error)).join('')}</div>
-    <div class="report-review">${assessment(pair.evaluation, decision)}
+    decision.preference, pair[side].error, preferredBadge(decision))).join('')}</div>
+    <div class="report-review">${assessment(pair.evaluation, decision, pair.verification)}
     ${decision.checks.map(check => `<p class="notice">${escape(check.phrase)}: baseline ${check.baseline ? 'Pass' : 'Fail'}, candidate ${check.candidate ? 'Pass' : 'Fail'}</p>`).join('')}
     ${pair.evaluationError ? `<p class="warning-callout">${escape(pair.evaluationError)}</p>` : ''}</div></section>`;
   }).join('')
     : `<section class="report-run"><h2>Quality review</h2>${assessment(result.evaluation, decision)}<h2 class="section-title">Model reports</h2>
       <div class="readable-responses">${['baseline', 'candidate'].map(side =>
-    response(side, result[side], result[side].response ? 'Received' : 'Missing', winner)).join('')}</div></section>`;
+    response(side, result[side], result[side].response ? 'Received' : 'Missing', winner, undefined,
+      preferredBadge(decision))).join('')}</div></section>`;
   const warnings = [...(summary?.warnings || []), ...(result.fairness?.warnings || []).map(item => item.message)];
   const prompt = result.comparisonKind === 'prompt' ? promptDecision(result) : null;
   const promptReport = prompt ? `<section class="prompt-verdict"><p class="eyebrow">PROMPT EDIT REVIEW</p>

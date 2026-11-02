@@ -11,7 +11,7 @@ const { validatePromptChanges } = require('./prompt-review');
 const { responseContent } = require('./response');
 const { validateCollection } = require('./prompt-evidence');
 const { evaluateChecks, pairDecision, validateReviewSettings } = require('./decision');
-const { validateVerification } = require('./verification');
+const { validateVerification, verificationMatches } = require('./verification');
 
 const MAX_REPETITIONS = 5;
 const MAX_RECORD_BYTES = 8 * 1024 * 1024;
@@ -288,6 +288,7 @@ async function orchestrateTest(input, { runVariant, evaluatePair, comparePair, s
     } catch (error) {
       pair.evaluationStatus = cancelled() ? 'cancelled' : 'failed';
       pair.evaluationError = String(error.message || error).slice(0, 500);
+      if (error.partialVerification) pair.verification = error.partialVerification;
     }
     await publish();
   }
@@ -316,7 +317,8 @@ function summarizeTest(record) {
     }
     const checks = decision.checks;
     for (const side of ['baseline', 'candidate']) {
-      if (record.plan.verification && pair.evaluation?.verification?.[side]?.status !== 'passed') {
+      const verification = pair.evaluation?.verification || pair.verification;
+      if (record.plan.verification && verification?.[side]?.status !== 'passed') {
         verificationFailures.add(side);
       }
     }
@@ -331,7 +333,6 @@ function summarizeTest(record) {
     if (pair.evaluationStatus !== 'succeeded') { counts.failed++; continue; }
     if (decision.preference) counts[decision.preference]++;
     else counts.unresolved++;
-    for (const reason of decision.status === 'blocked' ? decision.reasons : []) block('Pair ' + pair.number + ': ' + reason);
   }
   const metrics = {};
   for (const side of ['baseline', 'candidate']) {
@@ -444,6 +445,9 @@ function validateTestRecord(record) {
         pair.evaluation.judgments.length > 2 || !Array.isArray(pair.evaluation.inputTokenEstimates) || !pair.evaluation.model ||
         !pair.evaluation.criteria.every(item => Array.isArray(item.citations) && item.citations.length <= 12))) invalid();
     if (pair.evaluationStatus === 'succeeded' && (pair.baseline.status !== 'succeeded' || pair.candidate.status !== 'succeeded')) invalid();
+    if (pair.verification && (!plan.verification || !verificationMatches(pair.verification, {
+      verification: plan.verification, baseline: pair.baseline.result, candidate: pair.candidate.result
+    }))) invalid();
     const resolution = pair.evaluation?.resolution;
     if (resolution && (!['completed', 'failed'].includes(resolution.status) ||
         typeof resolution.evidence !== 'string' || Buffer.byteLength(resolution.evidence) > 131072 ||

@@ -122,6 +122,59 @@ test('executable observations are bound to both outputs and relabeled for revers
   await assert.rejects(resolveReview(input, { verify: async () => stale, evaluate: async () => assessment() }), /do not match/);
 });
 
+test('completed verification survives an evaluator failure in the saved pair', async () => {
+  const input = { ...source(), verification: { kind: 'node-commonjs', name: 'checker.cjs',
+    source: 'trusted checker', timeoutSeconds: 30 }, test: { repetitions: 1 } };
+  const record = await orchestrateTest(input, {
+    comparePair: () => ({ checks: [], fairness: { warnings: [], unknowns: [] } }),
+    runVariant: async (request, side) => ({ ...request, response: side + ' answer' }),
+    evaluatePair: pair => resolveReview(pair, {
+      verify: async verifiedInput => {
+        const observation = (side, status) => ({ status,
+          responseHash: digest(verifiedInput[side].response), detail: status === 'passed' ? 'One passing test' : 'Failed check',
+          ...(status === 'passed' ? { tests: 1, passed: 1, failed: 0, exitCode: 0 } : {}) });
+        return { image: 'sha256:' + 'b'.repeat(64), checkerHash: digest(verifiedInput.verification.source),
+          baseline: observation('baseline', 'failed'), candidate: observation('candidate', 'passed') };
+      },
+      evaluate: async () => { throw new Error('Evaluator quota exceeded'); }
+    })
+  });
+  const pair = record.pairs[0];
+  assert.equal(pair.evaluationStatus, 'failed');
+  assert.equal(pair.evaluation, null);
+  assert.equal(pair.verification.baseline.status, 'failed');
+  assert.equal(pair.verification.candidate.status, 'passed');
+  const saved = validateTestRecord(JSON.parse(JSON.stringify(record)));
+  assert.deepEqual(saved.pairs[0].verification, pair.verification);
+});
+
+test('Markdown reports aggregate confidence separately from the last pair assessment', async () => {
+  const input = { ...source(), review: { decisionPolicy: 'best-supported' }, test: { repetitions: 3 } };
+  let review = 0;
+  const record = await orchestrateTest(input, {
+    comparePair: () => ({ checks: [], fairness: { warnings: [] } }),
+    runVariant: async (request, side) => ({ ...request, response: side + ' answer' }),
+    evaluatePair: async () => {
+      const provisional = ++review < 3;
+      return { verdict: 'candidate', preferenceEstablished: true, orderConsistent: true,
+        summary: 'Candidate answer follows the evidence.', criteria: [
+          { criterion: 'grounding', verdict: provisional ? 'insufficient_evidence' : 'candidate', rationale: 'Grounding review.', citations: [] },
+          { criterion: 'reasoning', verdict: 'candidate', rationale: 'Supported reasoning.', citations: [] }
+        ], unknowns: [], judgments: [], inputTokenEstimates: [], usageTurns: [], requestCount: 1,
+        citationRepairs: 0, elapsedMs: 1, rubricVersion: 1, model: { name: 'Reviewer', id: 'reviewer' } };
+    }
+  });
+  const report = compare({ ...input, baseline: { ...input.baseline, response: 'baseline answer' },
+    candidate: { ...input.candidate, response: 'candidate answer' } });
+  report.testRun = record;
+  report.testSummary = summarizeTest(record);
+  report.evaluation = record.pairs.at(-1).evaluation;
+  const markdown = asMarkdown(report);
+  assert.equal(report.testSummary.confidence, 'low');
+  assert.match(markdown, /Aggregate recommendation confidence: \*\*low\*\*\. Provisional pick, not a proven improvement\./);
+  assert.match(markdown, /Recommendation confidence: medium\./);
+});
+
 test('review policy and checker survive plan validation and exported provisional decisions show uncertainty', async () => {
   const input = source();
   const record = await orchestrateTest(input, { comparePair: compare,

@@ -77,8 +77,9 @@ function promptDecision(result) {
   const complete = record ? record.status === 'completed' && assessments.length === record.plan.repetitions : assessments.length === 1;
   const gates = record ? record.pairs.map(pair => pairDecision(record.plan, pair)) : [comparisonDecision(result)];
   const blockers = gates.flatMap(gate => gate.status === 'blocked' ? gate.reasons : []);
+  const preferred = gates.every(gate => gate.status === 'preferred');
   const effectiveChanged = prompt?.effectiveChanged !== false;
-  const trusted = complete && effectiveChanged && !blockers.length && assessments.every(assessment => assessment.preferenceEstablished === true &&
+  const trusted = complete && preferred && effectiveChanged && !blockers.length && assessments.every(assessment => assessment.preferenceEstablished === true &&
     assessment.orderConsistent === true && assessment.promptChanges?.length &&
     assessment.criteria?.some(item => item.criterion === 'grounding' && item.verdict !== 'insufficient_evidence') &&
     assessment.criteria?.some(item => ['grounding', 'reasoning', 'completeness', 'actionability', 'uncertainty'].includes(item.criterion) && item.verdict === preference) &&

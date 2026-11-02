@@ -11,7 +11,12 @@ async function resolveReview(input, { evaluate, collectEvidence, verify, progres
     if (!verificationMatches(verification, input)) throw new Error('Executable check results do not match these outputs and checker.');
     packet.verificationResults = verification;
   }
-  const initial = await evaluate(packet);
+  let initial;
+  try { initial = await evaluate(packet); }
+  catch (error) {
+    if (verification) error.partialVerification = verification;
+    throw error;
+  }
   const finish = assessment => ({ ...assessment, ...(verification ? { verification } : {}),
     ...(input.review?.decisionPolicy ? { decisionPolicy: input.review.decisionPolicy } : {}),
     elapsedMs: Date.now() - started });

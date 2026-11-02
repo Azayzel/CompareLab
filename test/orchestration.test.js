@@ -268,6 +268,28 @@ test('order bias and ungrounded defaults are unresolved rather than counted as m
   }
 });
 
+test('a blocked losing-side acceptance check leaves the other side eligible for its majority', async () => {
+  let review = 0;
+  const record = await orchestrateTest({ ...experiment(), checks: { requiredPhrases: ['contract marker'] },
+    test: { repetitions: 3 } }, {
+    comparePair: () => ({ checks: [], fairness: { warnings: [] } }),
+    runVariant: async (request, side) => ({ ...request, response: side === 'baseline' ? 'Baseline answer' : 'contract marker' }),
+    evaluatePair: async () => {
+      const verdict = ++review === 1 ? 'baseline' : 'candidate';
+      return { verdict, preferenceEstablished: true, orderConsistent: true, summary: 'Supported result.',
+        criteria: [{ criterion: 'grounding', verdict, rationale: 'Supported by the evidence.', citations: [] }],
+        unknowns: [], judgments: [], inputTokenEstimates: [], usageTurns: [], requestCount: 1,
+        citationRepairs: 0, elapsedMs: 1, rubricVersion: 1, model: { name: 'Reviewer', id: 'reviewer' } };
+    }
+  });
+  const summary = summarizeTest(record);
+  assert.equal(summary.counts.candidate, 2);
+  assert.equal(summary.counts.unresolved, 1);
+  assert.equal(summary.preference, 'candidate');
+  assert.equal(summary.acceptance.baseline.failed, 3);
+  assert.equal(summary.acceptance.candidate.failed, 0);
+});
+
 test('test imports reject altered frozen inputs and invalid usage', async () => {
   const record = await orchestrateTest(experiment(), runners());
   const altered = structuredClone(record);

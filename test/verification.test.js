@@ -50,6 +50,9 @@ test('each output uses a separate restricted container and cleanup runs after su
     const directory = mount.match(/src=([^,]+)/)[1];
     directories.push(directory);
     assert.deepEqual((await fs.readdir(directory)).sort(), ['checker.cjs', 'harness.cjs', 'solution.cjs']);
+    for (const file of ['checker.cjs', 'harness.cjs', 'solution.cjs']) {
+      assert.equal((await fs.stat(directory + '/' + file)).mode & 0o777, 0o644);
+    }
     return { code: 0, output: tap };
   } });
   assert.equal(result.baseline.status, 'passed');

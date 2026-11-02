@@ -204,6 +204,10 @@ test('prompt decisions distinguish better, worse, uncertain, incomplete and unsa
     r => { r.evaluation.orderConsistent = false; },
     r => { r.evaluation.orderConsistent = null; },
     r => { r.evaluation.preferenceEstablished = false; },
+    r => {
+      r.evaluation.resolution = { status: 'completed' };
+      r.evaluation.judgments[1].criteria[0].verdict = 'baseline';
+    },
     r => { r.evaluation.promptChanges = []; },
     r => { r.evaluation.promptChanges[0].effect = 'uncertain'; },
     r => { r.evaluation.judgments[1].promptChanges[0].effect = 'uncertain'; },
