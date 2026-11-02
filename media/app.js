@@ -23,6 +23,8 @@
   let reviewCancelling = false;
   let evidenceCollection = null;
   let toolSelection = [];
+  let verification = null;
+  let reviewOptions = { decisionPolicy: 'best-supported', resolveEvidence: true };
 
 
   const runMetadata = { a: {}, b: {} };
@@ -51,8 +53,10 @@
       toolSelection,
       prompt: $('prompt').value, incomingMessage: $('incomingMessage').value, evidence: $('evidence').value, baseline, candidate,
       ...(evidenceCollection ? { evidenceCollection } : {}),
-      review: { checkOrder: $('checkOrder').checked },
-      test: { repetitions: Number($('testRepetitions').value || 3) }, testRun,
+      review: { ...reviewOptions, checkOrder: $('checkOrder').checked },
+      ...(verification ? { verification } : {}),
+      test: { repetitions: Number($('testRepetitions').value || 3),
+        parallel: $('parallelModels').checked, modelTimeoutSeconds: Number($('modelTimeoutSeconds').value) }, testRun,
       checks: { requiredPhrases: $('checks').value.split(',').map(x => x.trim()).filter(Boolean) },
       ...(comparisonKind === 'prompt' ? {
         optimizer: {
@@ -79,6 +83,12 @@
   function restore(data) {
     if (!data || typeof data !== 'object') return;
     comparisonKind = data.comparisonKind === 'prompt' ? 'prompt' : 'model';
+    reviewOptions = Object.fromEntries(['decisionPolicy', 'resolveEvidence']
+      .filter(key => data.review?.[key] !== undefined).map(key => [key, data.review[key]]));
+    verification = data.verification || null;
+    $('checkerSummary').textContent = verification ? verification.name + ' (' + verification.timeoutSeconds + '-second isolated runs; approval required)' : 'No executable checker selected.';
+    fill('decisionPolicy', reviewOptions.decisionPolicy || 'strict');
+    $('resolveEvidence').checked = reviewOptions.resolveEvidence === true;
     evidenceCollection = data.evidenceCollection || data.testRun?.plan?.evidenceCollection || null;
     toolSelection = data.toolSelection || data.testRun?.plan?.toolCatalog?.map(tool => tool.name) || [];
     updateToolSummary();
@@ -98,6 +108,8 @@
     fill('comparisonMode', data.comparisonMode || 'end-to-end');
     $('checkOrder').checked = data.review?.checkOrder !== false;
     fill('testRepetitions', data.test?.repetitions ?? 3);
+    $('parallelModels').checked = data.test?.parallel === true;
+    fill('modelTimeoutSeconds', data.test?.modelTimeoutSeconds ?? 600);
 
     const defaults = { provider: 'vscode', tokenLimitField: 'max_completion_tokens', contextWindowSource: 'unverified' };
 
@@ -152,14 +164,17 @@
     $('promptTest').disabled = $('orchestrate').disabled;
     const repetitions = Number($('testRepetitions').value || 3);
     const reviews = repetitions * ($('checkOrder').checked ? 2 : 1);
-    $('comparisonRunSummary').textContent = 'Runs both models and reviews their outputs. ' +
+    $('comparisonRunSummary').textContent = 'Runs both models ' + ($('parallelModels').checked ? 'simultaneously' : 'sequentially') + ' and reviews their outputs. ' +
       repetitions + ' paired run' + (repetitions === 1 ? '' : 's') + '; ' +
-      reviews + ' review' + (reviews === 1 ? '' : 's') + '. Adjust in Advanced settings.';
+      reviews + ' review' + (reviews === 1 ? '' : 's') + '. ' +
+      (reviewOptions.resolveEvidence ? 'Evidence resolution may add up to 5 requests per pair. ' : '') +
+      (verification ? 'Isolated executable checks are enabled. ' : '') + 'Adjust in Advanced settings.';
     $('testBudget').textContent = repetitions * 2 + ($('comparisonMode').value === 'end-to-end' ? ' agent investigations; ' : ' generation requests; ') + repetitions * ($('checkOrder').checked ? 2 : 1) +
       ' review requests, plus up to ' + repetitions + ' citation corrections. ' +
+      (reviewOptions.resolveEvidence ? 'One resolution round per pair can add up to 3 collection requests, 6 tool calls, 1 adjudication and 1 citation repair. ' : '') +
       ($('comparisonMode').value === 'end-to-end'
         ? 'Only tools freshly marked verified read-only are enabled. Every call requires confirmation. Cancel to stop.'
-        : 'Sequential, frozen-evidence runs.');
+        : ($('parallelModels').checked ? 'Simultaneous' : 'Sequential') + ', frozen-evidence runs.');
   }
   function updateComparisonLayout() {
     const prompt = comparisonKind === 'prompt';
@@ -338,8 +353,8 @@
     if (hint) tile.appendChild(make('span', hint, 'metric-hint'));
     return tile;
   }
-  function preferredBadge() {
-    return make('span', '★ Preferred', 'status-badge preferred-badge');
+  function preferredBadge(provisional = false) {
+    return make('span', provisional ? '★ Provisional pick' : '★ Preferred', 'status-badge preferred-badge');
   }
   function variantLabel(side, kind = 'model') {
     return (side === 'baseline' ? 'Baseline' : 'Candidate') + (kind === 'prompt' ? ' prompt' : '');
@@ -488,6 +503,14 @@
       metric(limited ? 'Budget-limited answers (saved runs)' : 'Investigation mode', limited ? String(limited)
         : record.plan.comparisonMode === 'end-to-end' ? 'Full agent' : 'Frozen evidence'));
     hero.appendChild(totals);
+    if (summary?.requiredCheckCount) {
+      hero.appendChild(make('p', 'Required-check passes: baseline ' + summary.acceptance.baseline.passed + '/' +
+        summary.acceptance.baseline.total + '; candidate ' + summary.acceptance.candidate.passed + '/' +
+        summary.acceptance.candidate.total + ' successful responses. Failures block recommendation.', 'notice'));
+    }
+    if (summary?.confidence && summary.confidence !== 'none') hero.appendChild(make('p',
+      'Recommendation confidence: ' + summary.confidence + '. ' +
+      (summary.confidence === 'low' ? 'Provisional task-specific pick, not a proven improvement.' : 'Task-specific judgment, not statistical confidence.'), 'notice'));
     if (limited) hero.appendChild(make('p', 'Some answers use limited evidence. Truncation and skipped checks are recorded, not treated as complete investigations.', 'warning-callout'));
     container.replaceChildren(hero);
     const cards = make('div', '', 'analysis-models');
@@ -502,7 +525,7 @@
       cardHeading.append(make('h3', record.plan[side].model || 'Unspecified model'),
         badge(failed ? 'failed' : completed === record.plan.repetitions ? 'succeeded' : record.status === 'running' ? 'running' : record.status === 'cancelled' ? 'cancelled' : 'partial',
           budgetLimited && completed === record.plan.repetitions));
-      if (preferred) cardHeading.appendChild(preferredBadge());
+      if (preferred) cardHeading.appendChild(preferredBadge(summary?.confidence === 'low'));
       card.append(cardHeading, make('p', variantLabel(side, record.plan.comparisonKind), 'model-role'));
       const values = make('div', '', 'model-metrics');
       values.append(metric('Responses', completed + ' / ' + record.plan.repetitions, failed ? failed + ' failed' : 'Paired runs'),
@@ -536,16 +559,18 @@
         : attempt.status === 'succeeded' ? 'ready' : attempt.status === 'not-started' ? 'waiting' : attempt.status;
       row.append(make('strong', 'Run ' + pair.number), make('span', 'Baseline: ' + state(pair.baseline) + ' / Candidate: ' + state(pair.candidate), 'run-summary-text'),
         badge(pair.evaluationStatus === 'succeeded' ? 'reviewed' : pair.evaluationStatus === 'not-started' ? 'not-reviewed' : 'review-' + pair.evaluationStatus));
-      detail.appendChild(make('p', 'Generation order: ' + pair.order.join(' then '), 'notice'));
+      detail.appendChild(make('p', (record.plan.parallel ? 'Simultaneous generation (launch order): ' : 'Generation order: ') + pair.order.join(' then '), 'notice'));
+      const decision = summary?.pairDecisions?.[pair.number - 1];
+      for (const reason of decision?.reasons || []) detail.appendChild(make('p', reason, 'warning-callout'));
       const responses = make('div', '', 'readable-responses');
       for (const side of ['baseline', 'candidate']) {
         const budget = pair[side].result?.investigationBudget;
-        const preferred = pair.evaluationStatus === 'succeeded' && pair.evaluation?.verdict === side;
+        const preferred = decision?.preference === side;
         const card = make('article', '', 'response-card' + (preferred ? ' model-preferred' : ''));
         const heading = make('div', '', 'model-card-heading');
         heading.append(make('h3', pair[side].result?.model || record.plan[side].model || 'Unspecified model'),
           badge(pair[side].status, budget?.limited));
-        if (preferred) heading.appendChild(preferredBadge());
+        if (preferred) heading.appendChild(preferredBadge(decision?.status === 'provisional'));
         card.append(heading, make('p', variantLabel(side, record.plan.comparisonKind), 'model-role'));
         const response = make('div', '', 'response-view');
         renderResponse(response, pair[side].result?.response, pair[side].error || 'This run has not produced a response.', 'raw-' + pair.number + '-' + side);
@@ -569,9 +594,10 @@
       if (pair.evaluation) {
         detail.appendChild(make('p', pair.evaluation.summary, 'assessment-summary'));
         renderCriteria(detail, pair.evaluation.criteria);
+        renderReviewEvidence(detail, pair.evaluation);
       }
       if (pair.evaluationError) detail.appendChild(make('p', pair.evaluationError, 'notice'));
-      for (const check of pair.checks) detail.appendChild(make('p', check.phrase + ': baseline ' + (check.baseline ? 'Pass' : 'Fail') + ', candidate ' + (check.candidate ? 'Pass' : 'Fail')));
+      for (const check of decision?.checks || []) detail.appendChild(make('p', check.phrase + ': baseline ' + (check.baseline ? 'Pass' : 'Fail') + ', candidate ' + (check.candidate ? 'Pass' : 'Fail')));
       container.appendChild(detail);
     }
     const notes = disclosure('notes', 'How to interpret these results', 'result-details analysis-notes');
@@ -616,7 +642,15 @@
       container.appendChild(row);
     }
   }
-  function renderEvaluation(assessment, record) {
+  function renderReviewEvidence(container, assessment) {
+    for (const [key, title] of [['verification', 'Executable check observations'], ['resolution', 'Evidence resolution audit']]) {
+      if (!assessment[key]) continue;
+      const detail = make('details', '', 'result-details');
+      detail.append(make('summary', title), make('pre', JSON.stringify(assessment[key], null, 2), 'response-content'));
+      container.appendChild(detail);
+    }
+  }
+  function renderEvaluation(assessment, record, decision) {
     const container = $('evaluation');
     container.replaceChildren();
     if (!assessment) {
@@ -627,13 +661,20 @@
       container.appendChild(empty);
       return;
     }
-    container.append(make('h3', assessment.verdict === 'baseline' ? 'Recommend Baseline'
-      : assessment.verdict === 'candidate' ? 'Recommend Candidate' : verdictLabel(assessment.verdict), 'verdict'), make('p', assessment.summary, 'assessment-summary'));
+    container.append(make('h3', decision?.preference === 'baseline' ? 'Recommend Baseline'
+      : decision?.preference === 'candidate' ? 'Recommend Candidate' : 'No supported recommendation', 'verdict'));
+    for (const reason of decision?.reasons || []) container.appendChild(make('p', reason, 'warning-callout'));
+    if (decision?.confidence && decision.confidence !== 'none') container.appendChild(make('p',
+      'Recommendation confidence: ' + decision.confidence + (decision.status === 'provisional' ? ' — provisional pick, not a proven improvement.' : ' — not statistical confidence.'), 'notice'));
+    container.append(make('p', 'Evaluator judgment (before acceptance gates): ' +
+      (assessment.preferenceEstablished === false ? 'No established preference' : verdictLabel(assessment.verdict)), 'notice'),
+      make('p', assessment.summary, 'assessment-summary'));
     container.appendChild(make('p', 'Evaluator: ' + assessment.model.name + ' | Version: ' + assessment.model.version, 'notice'));
     const order = assessment.orderConsistent === null ? 'Not checked'
       : assessment.orderConsistent ? 'Same overall verdict in both orders' : 'Verdicts disagree';
     container.appendChild(make('p', 'Response-order check: ' + order, 'notice'));
     renderCriteria(container, assessment.criteria);
+    renderReviewEvidence(container, assessment);
     if (assessment.unknowns.length) {
       container.appendChild(make('h3', 'Remaining unknowns'));
       const list = make('ul', '');
@@ -674,7 +715,7 @@
     if (result.testRun) renderTest(result.testRun, result.testSummary);
     else $('testResults').hidden = true;
     $('results').hidden = false;
-    renderEvaluation(result.evaluation, result.testRun);
+    renderEvaluation(result.evaluation, result.testRun, result.decision);
     const selectedPair = result.testRun?.pairs.findLast(pair => pair.baseline.status === 'succeeded' && pair.candidate.status === 'succeeded') || result.testRun?.pairs.at(-1);
     $('responseHeading').textContent = selectedPair ? 'Model reports from Run ' + selectedPair.number : 'Model reports';
     $('responseDescription').textContent = selectedPair
@@ -683,11 +724,11 @@
     for (const side of ['baseline', 'candidate']) {
       const attempt = selectedPair?.[side];
       const limited = attempt?.result?.investigationBudget?.limited;
-      const preferred = selectedPair ? selectedPair.evaluationStatus === 'succeeded' && selectedPair.evaluation?.verdict === side
-        : result.evaluation?.verdict === side;
+      const preferred = selectedPair ? result.testSummary?.pairDecisions?.[selectedPair.number - 1]?.preference === side
+        : result.decision?.preference === side;
       $(side + 'ResponseCard').className = 'response-card' + (preferred ? ' model-preferred' : '');
       $(side + 'ResponseStatus').replaceChildren(badge(attempt?.status || (result[side].response ? 'succeeded' : 'not-started'), limited));
-      if (preferred) $(side + 'ResponseStatus').appendChild(preferredBadge());
+      if (preferred) $(side + 'ResponseStatus').appendChild(preferredBadge(result.decision?.status === 'provisional'));
       $(side + 'ResponseModel').textContent = result[side].model || 'Unspecified model';
       $(side + 'ResponseRole').textContent = variantLabel(side, result.comparisonKind);
       renderResponse($(side + 'Content'), result.content?.[side] ?? result[side].response,
@@ -944,6 +985,11 @@
     }
     if (msg.type === 'runResult' && ['a', 'b'].includes(msg.side)) applyRun(msg.side, msg.result);
     if (msg.type === 'runStatus' && ['a', 'b'].includes(msg.side)) $(msg.side + '-status').textContent = msg.message;
+    if (msg.type === 'checkerSelected') {
+      verification = msg.verification;
+      $('checkerSummary').textContent = verification.name + ' (isolated runs; approval required)';
+      invalidate(); save();
+    }
     if (msg.type === 'reviewStatus') {
       $('reviewStatus').textContent = msg.message;
       if (promptReviewRunning) {
@@ -1035,6 +1081,12 @@
   });
   $('loadInstructions').addEventListener('click', () => post('loadInstructions'));
   $('selectTools').addEventListener('click', () => post('selectTools'));
+  $('selectChecker').addEventListener('click', () => post('selectChecker'));
+  $('clearChecker').addEventListener('click', () => {
+    verification = null;
+    $('checkerSummary').textContent = 'No executable checker selected.';
+    invalidate(); save(); post('compare');
+  });
   for (const side of ['a', 'b']) {
     $(side + '-loadInstructions').addEventListener('click', () => post('loadInstructions', { side }));
     $(side + '-selectModel').addEventListener('click', () => post('selectModel', { side }));
@@ -1046,12 +1098,14 @@
     });
   }
   document.querySelectorAll('input,textarea,select').forEach(el => el.addEventListener('input', () => {
+    if (el.id === 'decisionPolicy') reviewOptions.decisionPolicy = el.value;
+    if (el.id === 'resolveEvidence') reviewOptions.resolveEvidence = el.checked;
     if (el.id?.startsWith('optimizer')) { revision++; save(); return; }
     if (comparisonKind === 'prompt') {
       if (el.id === 'evidence') evidenceCollection = null;
       if (el.id === 'incomingMessage' && evidenceCollection) { fill('evidence', ''); evidenceCollection = null; }
       if (['a-prompt', 'b-prompt'].includes(el.id)) clearPromptOutputs([el.id.slice(0, 1)]);
-      else if (!/response$/.test(el.id) && !['checks', 'testRepetitions', 'checkOrder', 'comparisonMode'].includes(el.id)) clearPromptOutputs(['a', 'b']);
+      else if (!/response$/.test(el.id) && !['decisionPolicy', 'resolveEvidence', 'checks', 'testRepetitions', 'checkOrder', 'comparisonMode', 'parallelModels', 'modelTimeoutSeconds'].includes(el.id)) clearPromptOutputs(['a', 'b']);
     }
     if (/^[ab]-/.test(el.id)) {
       const side = el.id.slice(0, 1);

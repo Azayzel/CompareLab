@@ -9,7 +9,8 @@ const { orchestrateTest } = require('../src/comparison/orchestration');
 
 const assets = {
   css: ['style.css', 'runners.css'].map(file => fs.readFileSync(path.join(__dirname, '../media', file), 'utf8')).join('\n'),
-  markdownScript: fs.readFileSync(path.join(__dirname, '../media/markdown.js'), 'utf8')
+  markdownScript: fs.readFileSync(path.join(__dirname, '../media/markdown.js'), 'utf8'),
+  logoPng: fs.readFileSync(path.join(__dirname, '../media/comparelab-icon.png'))
 };
 const input = () => ({ prompt: 'Diagnose the alert.', evidence: 'HTTP 401 increased.', baseline: {
   model: 'model-a', response: '# Findings\n\n**401 increased.**', inputTokens: 120, outputTokens: 30, elapsedMs: 1200
@@ -44,6 +45,11 @@ test('HTML report embeds styling and safe Markdown locally, with token provenanc
   assert.match(html, /Raw response/);
   assert.match(html, /@media print/);
   assert.match(html, /default-src 'none'/);
+  assert.match(html, /img-src data:;/);
+  assert.doesNotMatch(html, /⇄ CompareLab|<img[^>]+src="https?:/);
+  const logo = /class="brand-logo" src="data:image\/png;base64,([^"]+)"/.exec(html);
+  assert.ok(logo, 'The brand image must be embedded for offline reports');
+  assert.deepEqual(Buffer.from(logo[1], 'base64'), assets.logoPng);
   assert.doesNotMatch(html, /<script[^>]+src=|<link[^>]+href=|onload=/);
   const nonce = /script-src 'nonce-([^']+)'/.exec(html)[1];
   assert.ok([...html.matchAll(/<script\b([^>]*)>/g)].every(match => match[1].includes(`nonce="${nonce}"`)));

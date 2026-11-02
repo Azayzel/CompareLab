@@ -3,6 +3,7 @@ const { randomBytes } = require('node:crypto');
 const { responseContent } = require('../comparison/response');
 const { usageReport } = require('../metrics/usage');
 const { promptDecision } = require('../comparison/prompt-review');
+const { comparisonDecision, pairDecision } = require('../comparison/decision');
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, character =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -43,12 +44,14 @@ function usage(report) {
     .join('')}</tbody></table></div>`);
 }
 
-function assessment(value) {
+function assessment(value, decision) {
   if (!value) return '<p class="notice">No completed quality review. Text differences do not establish a winner.</p>';
-  const verdict = ['baseline', 'candidate'].includes(value.verdict) ? 'Recommend ' + label(value.verdict)
-    : value.verdict === 'tie' ? 'Tie' : 'Insufficient evidence';
+  const verdict = decision?.preference ? 'Recommend ' + label(decision.preference) : 'No supported recommendation';
   return `<div class="review-heading"><h3 class="verdict">${verdict}</h3>
     <span class="notice">Evaluator: ${escape(value.model?.name || value.model?.id || 'Unknown')}</span></div>
+    ${(decision?.reasons || []).map(reason => `<p class="warning-callout">${escape(reason)}</p>`).join('')}
+    ${decision?.confidence ? `<p class="notice">Recommendation confidence: ${escape(decision.confidence)}. ${decision.status === 'provisional' ? 'Provisional pick, not a proven improvement.' : 'Not statistical confidence.'}</p>` : ''}
+    <p class="notice">Evaluator judgment (before acceptance gates): ${escape(value.preferenceEstablished === false ? 'No established preference' : value.verdict)}</p>
     <p class="assessment-summary">${escape(value.summary)}</p>
     <p class="notice">Order check: ${value.orderConsistent === true ? 'Consistent' : value.orderConsistent === false ? 'Disagrees' : 'Not checked'}</p>
     ${(value.criteria || []).map(item => `<section class="criterion"><div class="criterion-heading">
@@ -56,19 +59,23 @@ function assessment(value) {
       <p>${escape(item.rationale)}</p>${details('Source citations', (item.citations || []).map(citation =>
     `<blockquote><strong>${escape(citation.source)}</strong><p>${escape(citation.quote)}</p></blockquote>`).join(''))}</section>`).join('')}
     ${(value.unknowns || []).length ? details('Remaining unknowns', '<ul>' + value.unknowns.map(item => `<li>${escape(item)}</li>`).join('') + '</ul>') : ''}
+    ${value.verification ? details('Executable check observations', raw(JSON.stringify(value.verification, null, 2))) : ''}
+    ${value.resolution ? details('Evidence resolution audit', raw(JSON.stringify(value.resolution, null, 2))) : ''}
     ${details('Evaluator usage (separate)', usage(usageReport(value.usageTurns || [])))}`;
 }
 
-function asHtml(result, { css, markdownScript }) {
+function asHtml(result, { css, markdownScript, logoPng }) {
   const nonce = randomBytes(18).toString('base64');
   const markdown = [];
+  const preferredBadge = result.testSummary?.confidence === 'low' || comparisonDecision(result).status === 'provisional'
+    ? preferred.replace('Preferred', 'Provisional pick') : preferred;
   const formatted = value => {
     const text = responseContent(value);
     const index = markdown.push(text) - 1;
     return `<div class="markdown-body" data-markdown="${index}">${raw(text)}</div>`;
   };
   const response = (side, value, status, winner, error) => `<article class="response-card${winner === side ? ' model-preferred' : ''}">
-    <div class="model-card-heading"><h3>${escape(value?.model || result[side].model || 'Unspecified model')}</h3><span>${winner === side ? preferred : ''}
+    <div class="model-card-heading"><h3>${escape(value?.model || result[side].model || 'Unspecified model')}</h3><span>${winner === side ? preferredBadge : ''}
     <span class="status-badge">${escape(status)}</span></span></div><p class="model-role">${label(side)}${result.comparisonKind === 'prompt' ? ' prompt' : ''}</p>
     ${tokens(value)}<div class="response-view">${value?.response ? formatted(value.response) : `<p class="warning-callout">${escape(error || 'No response available.')}</p>`}</div>
     ${value?.response ? details('Raw response', raw(value.response)) : ''}
@@ -77,7 +84,8 @@ function asHtml(result, { css, markdownScript }) {
     </article>`;
   const test = result.testRun;
   const summary = result.testSummary;
-  const winner = test ? summary?.preference : result.evaluation?.verdict;
+  const decision = comparisonDecision(result);
+  const winner = test ? summary?.preference : decision.preference;
   const hasWinner = ['baseline', 'candidate'].includes(winner);
   const kind = result.comparisonKind === 'prompt' ? 'Prompt comparison' : 'Model comparison';
   const title = hasWinner ? label(winner) + ' preferred for this task' : 'Compare the evidence. See the tradeoffs.';
@@ -85,10 +93,13 @@ function asHtml(result, { css, markdownScript }) {
     const metrics = summary?.metrics[side] || result[side];
     const latency = metrics.medianLatencyMs ?? metrics.elapsedMs;
     return `<article class="model-summary-card${winner === side ? ' model-preferred' : ''}">
-      <div class="model-card-heading"><h3>${escape(result[side].model || 'Unspecified model')}</h3>${winner === side ? preferred : ''}</div>
+      <div class="model-card-heading"><h3>${escape(result[side].model || 'Unspecified model')}</h3>${winner === side ? preferredBadge : ''}</div>
       <p class="model-role">${label(side)}${result.comparisonKind === 'prompt' ? ' prompt' : ''}</p><div class="model-metrics">
       ${metric(test ? 'Responses' : 'Response', test ? metrics.succeeded + ' / ' + test.plan.repetitions
     : result[side].response ? 'Available' : 'Missing')}
+      ${test && summary?.requiredCheckCount ? metric('Responses passing required checks',
+    summary.acceptance[side].passed + ' / ' + summary.acceptance[side].total, 'Across successful responses; failures block recommendation.')
+    : !test && result.checks?.length ? metric('Required checks', result.checks.filter(check => check[side]).length + ' / ' + result.checks.length) : ''}
       ${metric(test ? 'Median paired time' : 'Elapsed time', Number.isFinite(latency) ? (latency / 1000).toFixed(1) + ' s' : 'Unknown')}
       ${tokens(metrics, test ? 'Total tokens in / out' : 'Tokens in / out')}
       ${test ? tokens(metrics.tokensPerRun, 'Avg tokens in / out per run', 'Across ' + metrics.succeeded + ' successful runs; ~ means estimated') +
@@ -100,13 +111,18 @@ function asHtml(result, { css, markdownScript }) {
     <p class="notice">Preferred reflects the quality review, not lower token usage, cost, or latency. Tokens accumulate across turns as evidence is sent again.</p>
     <div class="overview-metrics">${summary.efficiency.map(item => metric(item.label, item.value, item.hint)).join('')}</div>
     ${details('Evaluator usage (separate from investigations)', usage(summary.evaluatorUsage))}</section>` : '';
-  const runs = test ? test.pairs.map(pair => `<section class="report-run"><div class="report-run-heading">
+  const runs = test ? test.pairs.map(pair => {
+    const decision = pairDecision(test.plan, pair);
+    return `<section class="report-run"><div class="report-run-heading">
     <h2>Run ${pair.number}</h2><span class="status-badge">${escape(pair.evaluationStatus)}</span></div>
-    <p class="notice">Generation order: ${escape(pair.order.join(' then '))}</p>
+    <p class="notice">${test.plan.parallel ? 'Simultaneous generation (launch order)' : 'Generation order'}: ${escape(pair.order.join(' then '))}</p>
     <div class="readable-responses">${['baseline', 'candidate'].map(side => response(side, pair[side].result, pair[side].status,
-    pair.evaluationStatus === 'succeeded' ? pair.evaluation?.verdict : null, pair[side].error)).join('')}</div>
-    <div class="report-review">${assessment(pair.evaluation)}${pair.evaluationError ? `<p class="warning-callout">${escape(pair.evaluationError)}</p>` : ''}</div></section>`).join('')
-    : `<section class="report-run"><h2>Quality review</h2>${assessment(result.evaluation)}<h2 class="section-title">Model reports</h2>
+    decision.preference, pair[side].error)).join('')}</div>
+    <div class="report-review">${assessment(pair.evaluation, decision)}
+    ${decision.checks.map(check => `<p class="notice">${escape(check.phrase)}: baseline ${check.baseline ? 'Pass' : 'Fail'}, candidate ${check.candidate ? 'Pass' : 'Fail'}</p>`).join('')}
+    ${pair.evaluationError ? `<p class="warning-callout">${escape(pair.evaluationError)}</p>` : ''}</div></section>`;
+  }).join('')
+    : `<section class="report-run"><h2>Quality review</h2>${assessment(result.evaluation, decision)}<h2 class="section-title">Model reports</h2>
       <div class="readable-responses">${['baseline', 'candidate'].map(side =>
     response(side, result[side], result[side].response ? 'Received' : 'Missing', winner)).join('')}</div></section>`;
   const warnings = [...(summary?.warnings || []), ...(result.fairness?.warnings || []).map(item => item.message)];
@@ -125,7 +141,7 @@ function asHtml(result, { css, markdownScript }) {
     ${details('Output changes', changesOnly(result.spans, result.outputPassages, 'output'))}` : '';
   const data = JSON.stringify(markdown).replaceAll('<', '\\u003c').replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'">
     <title>CompareLab — ${kind}</title><style nonce="${nonce}">
     :root { color-scheme: dark; --vscode-font-family: system-ui, -apple-system, sans-serif; --vscode-font-size: 14px;
       --vscode-foreground: #e8edf5; --vscode-descriptionForeground: #a4b0c4; --vscode-editor-background: #0c1220;
@@ -147,7 +163,9 @@ function asHtml(result, { css, markdownScript }) {
     @media print { :root { color-scheme: light; --vscode-foreground: #152034; --vscode-descriptionForeground: #43516a; --vscode-editor-background: white; --vscode-panel-border: #b7c1ce; --vscode-textCodeBlock-background: #edf2f7; --vscode-testing-iconPassed: #197041; }
       main { padding: 0; } .analysis-overview, .model-summary-card, .response-card, .report-review { background: white; box-shadow: none; }
       .readable-responses, .analysis-models { display: block; } article { margin: 14px 0; } .response-content { max-height: none; } }
-    </style></head><body><main><header><div><h1>⇄ CompareLab</h1><p>${kind} · Offline assessment report</p></div>
+    </style></head><body><main><header><div class="brand">
+    ${logoPng ? `<img class="brand-logo" src="data:image/png;base64,${Buffer.from(logoPng).toString('base64')}" alt="" width="44" height="44">` : ''}
+    <div><h1>CompareLab</h1><p>${kind} · Offline assessment report</p></div></div>
     <span class="status-badge">${escape(test?.status || (result.evaluation ? 'Reviewed' : 'Not evaluated'))}</span></header>
     ${prompt ? promptReport : `<section class="analysis-overview"><p class="eyebrow">${kind.toUpperCase()}</p><h2>${title}</h2>
     <p class="overview-description">${test ? escape(summary?.note) : 'A practical, task-specific comparison. Recommendations and cited evidence still require human verification.'}</p>

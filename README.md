@@ -1,3 +1,5 @@
+<img src="media/comparelab-icon.png" alt="CompareLab logo" width="64" height="64">
+
 # CompareLab
 
 Compare two AI models on the same task, or test whether a prompt edit helps.
@@ -9,19 +11,15 @@ or paste existing responses. No hosted CompareLab service or runtime npm depende
 
 ## Quick start
 
-To run CompareLab from source:
+1. Install [CompareLab from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=azayzel-comparelab.comparelab).
+2. Click the **CompareLab** Activity Bar icon, then **Open CompareLab**.
+3. Choose **Model comparison** or **Prompt comparison** and follow the steps below.
 
-1. Clone this repository and open it in VS Code.
-2. Press **F5** and select **Run CompareLab Extension**.
-3. In the new **Extension Development Host** window, click the **CompareLab**
-   Activity Bar icon, then **Open CompareLab**.
-4. Choose **Model comparison** or **Prompt comparison** and follow the steps below.
-
-Requires Node.js 20+ and VS Code 1.90+. Live tools require VS Code 1.95+,
+Requires VS Code 1.90+. Live tools require VS Code 1.95+,
 a tool-capable model, and a working tool provider in the same window.
 MCP support also depends on your VS Code version and server setup.
 
-Prefer a local install? See [build and installation](docs/guide.md#build-and-package).
+For source development or a local build, see [build and installation](docs/guide.md#build-and-package).
 The **CompareLab: Compare Model Outputs** command remains available in the Command Palette.
 
 ## Compare models
@@ -34,7 +32,7 @@ The **CompareLab: Compare Model Outputs** command remains available in the Comma
 4. Click **Run comparison**. It runs both sides and reviews their outputs.
 
 Read the reports and cited assessment side by side. The visible run summary shows
-how many pairs and reviews are planned; adjust them under **Advanced settings**.
+how many pairs and reviews are planned; **Advanced settings** also offers simultaneous models and a configurable VS Code timeout (10 minutes by default).
 The default is three pairs with reversed-order reviews.
 
 For pasted responses, open each **Paste / edit raw response** editor, then use
@@ -52,8 +50,10 @@ By default, both prompts receive the same evidence without live tools.
 The review links the instruction change to quotes from both outputs.
 It can recommend keeping the original; a different answer is not automatically better.
 
-Try the [GitHub demo](examples/github-tools-demo.md) for ready-to-use prompts,
-a [triage agent](examples/github-triage.agent.md), and a screenshot walkthrough.
+Try the [Pokemon MCP picnic](examples/pokemon-mcp-demo.md) for a free, no-key tool demo,
+or [GitHub triage](examples/github-tools-demo.md). Both include an agent file,
+copy-paste prompts, and screenshot tips.
+For code, try the [async scheduler challenge](examples/async-scheduler-demo.md) with executable checks.
 
 ## Keep and share results
 
@@ -64,6 +64,7 @@ without rerunning its models.
 ## Know the limits
 
 - Reviews are model judgments, not verified correctness or a model leaderboard.
+- Required phrase checks block recommendations when they fail; passing is not proof of correctness.
 - Live investigations can gather different evidence. Use a shared snapshot to isolate prompt changes.
 - Every live test needs fresh read-only verification, and every tool call needs approval.
   Verification is not a sandbox; use trusted tools and read-only server permissions.

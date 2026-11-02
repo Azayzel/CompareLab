@@ -83,8 +83,10 @@ function efficiencyMetrics(metrics, repetitions) {
     let reason = 'Requires all planned runs to succeed on both sides.';
     if (complete) {
       if (kind === 'time') {
-        left = a.medianLatencyMs; right = b.medianLatencyMs;
-        reason = 'Paired timing unavailable.';
+        if (a.latencySamples === repetitions && b.latencySamples === repetitions) {
+          left = a.medianLatencyMs; right = b.medianLatencyMs;
+        }
+        reason = 'Requires paired timing for every planned run.';
       } else {
         const key = kind + 'Tokens';
         const estimate = 'estimated' + kind[0].toUpperCase() + kind.slice(1) + 'Tokens';

@@ -1,4 +1,5 @@
 'use strict';
+const { modelTimeoutSeconds, DEFAULT_MODEL_TIMEOUT_SECONDS } = require('../providers/vscode/limits');
 
 const { createHash, randomUUID } = require('node:crypto');
 const { normalizedEndpoint, validateModelInput } = require('../providers/http');
@@ -9,6 +10,8 @@ const { activity, usageReport, efficiencyMetrics, validateUsageTurns, TOKEN_FIEL
 const { validatePromptChanges } = require('./prompt-review');
 const { responseContent } = require('./response');
 const { validateCollection } = require('./prompt-evidence');
+const { evaluateChecks, pairDecision, validateReviewSettings } = require('./decision');
+const { validateVerification } = require('./verification');
 
 const MAX_REPETITIONS = 5;
 const MAX_RECORD_BYTES = 8 * 1024 * 1024;
@@ -79,6 +82,12 @@ function createTestPlan(input, { legacyBudget = false, legacyDatadog = legacyBud
   if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > MAX_REPETITIONS) {
     throw new Error('Choose between 1 and ' + MAX_REPETITIONS + ' paired runs.');
   }
+  if (input.test?.parallel !== undefined && typeof input.test.parallel !== 'boolean') {
+    throw new Error('Run models simultaneously must be a boolean.');
+  }
+  if (input.test?.modelTimeoutSeconds !== undefined) modelTimeoutSeconds(input.test.modelTimeoutSeconds);
+  const review = validateReviewSettings(input.review);
+  const verification = validateVerification(input.verification);
   const variants = {};
   for (const side of ['baseline', 'candidate']) {
     const source = { ...input[side], provider: input[side]?.provider || 'vscode' };
@@ -125,7 +134,11 @@ function createTestPlan(input, { legacyBudget = false, legacyDatadog = legacyBud
     variants[side] = Object.fromEntries(MODEL_SETTINGS.map(key => [key, variants[side][key]]));
   }
   const plan = { task, evidence, requestPrompt, repetitions, ...variants,
-    review: { checkOrder: input.review?.checkOrder !== false },
+    ...(input.test?.parallel === true ? { parallel: true } : {}),
+    ...(input.test?.modelTimeoutSeconds !== undefined && input.test.modelTimeoutSeconds !== DEFAULT_MODEL_TIMEOUT_SECONDS
+      ? { modelTimeoutSeconds: input.test.modelTimeoutSeconds } : {}),
+    review,
+    ...(verification ? { verification } : {}),
     checks: { requiredPhrases: Array.isArray(input.checks?.requiredPhrases)
       ? input.checks.requiredPhrases.filter(phrase => typeof phrase === 'string' && phrase.trim()) : [] } };
   if (!legacyDatadog) plan.instructionsVersion = 2;
@@ -188,7 +201,12 @@ async function orchestrateTest(input, { runVariant, evaluatePair, comparePair, s
   const plan = createTestPlan(input);
   const record = { schemaVersion: 1, id: randomUUID(), status: 'running', startedAt: new Date().toISOString(),
     completedAt: null, plan, pairs: [] };
-  const publish = async () => onUpdate(structuredClone(record));
+  let updates = Promise.resolve();
+  const publish = () => {
+    const snapshot = structuredClone(record);
+    updates = updates.then(() => onUpdate(snapshot));
+    return updates;
+  };
   const cancelled = () => signal?.aborted === true;
   let storageFull = false;
   await publish();
@@ -197,8 +215,8 @@ async function orchestrateTest(input, { runVariant, evaluatePair, comparePair, s
     const pair = { number: index + 1, order, baseline: { status: 'not-started' }, candidate: { status: 'not-started' },
       evaluationStatus: 'not-started', evaluation: null, checks: [], fairness: null };
     record.pairs.push(pair);
-    for (const side of order) {
-      if (cancelled()) break;
+    const runAttempt = async side => {
+      if (cancelled() || storageFull) return;
       const attempt = pair[side];
       attempt.status = 'running';
       attempt.startedAt = new Date().toISOString();
@@ -233,7 +251,16 @@ async function orchestrateTest(input, { runVariant, evaluatePair, comparePair, s
       }
       attempt.completedAt = new Date().toISOString();
       await publish();
-      if (storageFull) break;
+    };
+    if (plan.parallel) {
+      const outcomes = await Promise.allSettled(order.map(runAttempt));
+      const failed = outcomes.find(outcome => outcome.status === 'rejected');
+      if (failed) throw failed.reason;
+    } else {
+      for (const side of order) {
+        await runAttempt(side);
+        if (cancelled() || storageFull) break;
+      }
     }
     if (cancelled() || storageFull) break;
     if (pair.baseline.status !== 'succeeded' || pair.candidate.status !== 'succeeded') continue;
@@ -241,6 +268,7 @@ async function orchestrateTest(input, { runVariant, evaluatePair, comparePair, s
     const pairInput = { prompt: instructions, incomingMessage: plan.incomingMessage || '', evidence: pairEvidence(plan, pair),
       ...(plan.comparisonKind ? { comparisonKind: plan.comparisonKind } : {}),
       ...(plan.comparisonMode ? { comparisonMode: plan.comparisonMode } : {}), review: plan.review, checks: plan.checks,
+      ...(plan.verification ? { verification: plan.verification } : {}),
       baseline: { ...pair.baseline.result, prompt: plan.prompts?.baseline ?? instructions },
       candidate: { ...pair.candidate.result, prompt: plan.prompts?.candidate ?? instructions } };
     const comparison = comparePair(pairInput);
@@ -273,25 +301,37 @@ async function orchestrateTest(input, { runVariant, evaluatePair, comparePair, s
 function summarizeTest(record) {
   const counts = { baseline: 0, candidate: 0, unresolved: 0, failed: 0 };
   const warnings = new Set();
+  const blockers = new Set();
+  const verificationFailures = new Set();
+  const block = message => { warnings.add(message); blockers.add(message); };
+  if (record.plan.parallel) warnings.add('Models ran simultaneously. Shared compute and provider quotas can affect latency and failures; this is not an isolated speed benchmark.');
   if (record.plan.comparisonMode === 'end-to-end') warnings.add('Independent live tool requests can return different evidence or change shared state. This compares end-to-end agents, not isolated model or prompt quality.');
-  const substantive = ['grounding', 'reasoning', 'completeness', 'actionability', 'uncertainty'];
+  const pairDecisions = record.pairs.map(pair => pairDecision(record.plan, pair));
+  const acceptance = Object.fromEntries(['baseline', 'candidate'].map(side => [side, { passed: 0, failed: 0, total: 0 }]));
   for (const pair of record.pairs) {
-    for (const warning of pair.fairness?.warnings || []) warnings.add(warning.message);
-    const limited = ['baseline', 'candidate'].some(side => pair[side].result?.investigationBudget?.limited || pair[side].result?.toolEvidence?.some(item => item.truncated));
+    const decision = pairDecisions[pair.number - 1];
+    for (const warning of pair.fairness?.warnings || []) {
+      if (warning.severity === 'high' || record.plan.review?.decisionPolicy !== 'best-supported') block(warning.message);
+      else warnings.add(warning.message);
+    }
+    const checks = decision.checks;
     for (const side of ['baseline', 'candidate']) {
-      for (const reason of pair[side].result?.investigationBudget?.reasons || []) warnings.add('Pair ' + pair.number + ' ' + side + ': ' + reason);
+      if (record.plan.verification && pair.evaluation?.verification?.[side]?.status !== 'passed') {
+        verificationFailures.add(side);
+      }
+    }
+    for (const side of ['baseline', 'candidate']) {
+      if (pair[side].status !== 'succeeded') continue;
+      acceptance[side].total++;
+      acceptance[side][checks.every(check => check[side]) ? 'passed' : 'failed']++;
+    }
+    for (const side of ['baseline', 'candidate']) {
+      for (const reason of pair[side].result?.investigationBudget?.reasons || []) block('Pair ' + pair.number + ' ' + side + ': ' + reason);
     }
     if (pair.evaluationStatus !== 'succeeded') { counts.failed++; continue; }
-    const assessment = pair.evaluation;
-    const winner = assessment?.verdict;
-    const grounded = assessment?.criteria?.find(item => item.criterion === 'grounding')?.verdict;
-    const adverse = pair.fairness?.warnings?.some(warning => warning.severity === 'high') ||
-      assessment?.criteria?.some(item => ['grounding', 'actionability'].includes(item.criterion) &&
-        ['baseline', 'candidate'].includes(item.verdict) && item.verdict !== winner);
-    const supported = assessment?.criteria?.some(item => substantive.includes(item.criterion) && item.verdict === winner);
-    if (!limited && ['baseline', 'candidate'].includes(winner) && assessment.preferenceEstablished !== false && assessment.orderConsistent === true &&
-        grounded && grounded !== 'insufficient_evidence' && supported && !adverse) counts[winner]++;
+    if (decision.preference) counts[decision.preference]++;
     else counts.unresolved++;
+    for (const reason of decision.status === 'blocked' ? decision.reasons : []) block('Pair ' + pair.number + ': ' + reason);
   }
   const metrics = {};
   for (const side of ['baseline', 'candidate']) {
@@ -299,7 +339,8 @@ function summarizeTest(record) {
     const results = attempts.filter(attempt => attempt.status === 'succeeded').map(attempt =>
       ({ ...attempt.result, ...activity(attempt.result, record.plan.comparisonMode === 'end-to-end') }));
     const latencies = record.pairs.filter(pair => pair.baseline.status === 'succeeded' && pair.candidate.status === 'succeeded' &&
-      Number.isFinite(pair.baseline.result.elapsedMs) && Number.isFinite(pair.candidate.result.elapsedMs))
+      Number.isFinite(pair.baseline.result.elapsedMs) && pair.baseline.result.elapsedMs >= 0 &&
+      Number.isFinite(pair.candidate.result.elapsedMs) && pair.candidate.result.elapsedMs >= 0)
       .map(pair => pair[side].result.elapsedMs).filter(value => Number.isFinite(value) && value >= 0).sort((left, right) => left - right);
     const middle = Math.floor(latencies.length / 2);
     const sum = key => results.reduce((total, result) => total + (result[key] ?? 0), 0);
@@ -321,14 +362,22 @@ function summarizeTest(record) {
     { missingRuns: results.some(result => !result.usageTurns?.length) || attempts.length !== results.length });
   }
   for (const key of ['temperature', 'maxOutputTokens', 'contextWindowTokens']) {
-    if (String(record.plan.baseline[key] ?? '') !== String(record.plan.candidate[key] ?? '')) warnings.add('Configured ' + key + ' differs between models.');
+    if (String(record.plan.baseline[key] ?? '') !== String(record.plan.candidate[key] ?? '')) block('Configured ' + key + ' differs between models.');
+  }
+  for (const side of ['baseline', 'candidate']) {
+    if (acceptance[side].failed) warnings.add(side + ' failed required checks in ' + acceptance[side].failed +
+      '/' + acceptance[side].total + ' successful responses and cannot be recommended for this test.');
   }
   let preference = 'inconclusive';
-  if (record.status === 'completed' && warnings.size === (record.plan.comparisonMode === 'end-to-end' ? 1 : 0)) {
-    if (counts.candidate > record.plan.repetitions / 2) preference = 'candidate';
-    if (counts.baseline > record.plan.repetitions / 2) preference = 'baseline';
+  if (record.status === 'completed' && blockers.size === 0) {
+    if (counts.candidate > record.plan.repetitions / 2 && !acceptance.candidate.failed && !verificationFailures.has('candidate')) preference = 'candidate';
+    if (counts.baseline > record.plan.repetitions / 2 && !acceptance.baseline.failed && !verificationFailures.has('baseline')) preference = 'baseline';
   }
-  return { counts, metrics, preference, warnings: [...warnings], efficiency: efficiencyMetrics(metrics, record.plan.repetitions),
+  for (const side of verificationFailures) warnings.add(side + ' did not pass executable checks in every paired run and cannot be recommended.');
+  return { counts, metrics, preference, acceptance, pairDecisions,
+    confidence: preference === 'inconclusive' ? 'none' : pairDecisions.some(decision => decision.status === 'provisional') ? 'low' : 'medium',
+    requiredCheckCount: evaluateChecks({}, {}, record.plan.checks).length,
+    blockers: [...blockers], warnings: [...warnings], efficiency: efficiencyMetrics(metrics, record.plan.repetitions),
     evaluatorUsage: usageReport(record.pairs.flatMap(pair => (pair.evaluation?.usageTurns || [])
       .map((turn, index) => ({ ...turn, run: pair.number, turn: index + 1 }))),
     { missingRuns: record.pairs.some(pair => pair.evaluationStatus !== 'not-started' && !pair.evaluation?.usageTurns?.length) }),
@@ -349,7 +398,8 @@ function validateTestRecord(record) {
     toolCatalog: record.plan.toolCatalog,
     baseline: { ...record.plan.baseline, prompt: record.plan.prompts?.baseline },
     candidate: { ...record.plan.candidate, prompt: record.plan.prompts?.candidate },
-    review: record.plan.review, checks: record.plan.checks, test: { repetitions: record.plan.repetitions },
+    review: record.plan.review, verification: record.plan.verification, checks: record.plan.checks, test: { repetitions: record.plan.repetitions,
+      parallel: record.plan.parallel, modelTimeoutSeconds: record.plan.modelTimeoutSeconds },
     ...(record.plan.evidenceCollection ? { evidenceCollection: record.plan.evidenceCollection } : {}) },
   { legacyBudget: record.plan.comparisonMode === 'end-to-end' && record.plan.investigationMode === undefined,
     legacyDatadog: record.plan.instructionsVersion === undefined,
@@ -394,7 +444,15 @@ function validateTestRecord(record) {
         pair.evaluation.judgments.length > 2 || !Array.isArray(pair.evaluation.inputTokenEstimates) || !pair.evaluation.model ||
         !pair.evaluation.criteria.every(item => Array.isArray(item.citations) && item.citations.length <= 12))) invalid();
     if (pair.evaluationStatus === 'succeeded' && (pair.baseline.status !== 'succeeded' || pair.candidate.status !== 'succeeded')) invalid();
-    const assessments = pair.evaluation ? [pair.evaluation, ...(pair.evaluation.judgments || [])] : [];
+    const resolution = pair.evaluation?.resolution;
+    if (resolution && (!['completed', 'failed'].includes(resolution.status) ||
+        typeof resolution.evidence !== 'string' || Buffer.byteLength(resolution.evidence) > 131072 ||
+        !['not-requested', 'collected', 'unavailable'].includes(resolution.evidenceStatus) ||
+        !resolution.initial || resolution.status === 'completed' && !resolution.assessment ||
+        resolution.status === 'failed' && typeof resolution.error !== 'string')) invalid();
+    if (resolution?.collection) validateUsageTurns(resolution.collection.usageTurns);
+    const assessments = pair.evaluation ? [pair.evaluation, ...(pair.evaluation.judgments || []),
+      ...(resolution ? [resolution.initial, ...(resolution.assessment ? [resolution.assessment] : [])] : [])] : [];
     for (const assessment of assessments) {
       validateUsageTurns(assessment?.usageTurns);
       if (assessment?.promptChanges !== undefined) {

@@ -67,9 +67,9 @@ test('activity uses recorded counts, supports old transcripts, and does not inve
 
 test('relative metrics require complete comparable usage and handle zero, missing and mixed sources', () => {
   const a = { succeeded: 3, inputTokens: null, outputTokens: null, estimatedInputTokens: 448206,
-    estimatedOutputTokens: 13428, medianLatencyMs: 51700 };
+    estimatedOutputTokens: 13428, medianLatencyMs: 51700, latencySamples: 3 };
   const b = { succeeded: 3, inputTokens: null, outputTokens: null, estimatedInputTokens: 1102049,
-    estimatedOutputTokens: 31638, medianLatencyMs: 113400 };
+    estimatedOutputTokens: 31638, medianLatencyMs: 113400, latencySamples: 3 };
   const metrics = (left = a, right = b) => efficiencyMetrics({ baseline: left, candidate: right }, 3);
   assert.deepEqual(metrics().map(item => item.value), ['~2.46x baseline', '~2.36x baseline', '2.19x baseline']);
   assert.equal(metrics({ ...a, inputTokens: 448206 })[0].value, 'Not comparable');
@@ -77,4 +77,6 @@ test('relative metrics require complete comparable usage and handle zero, missin
   assert.equal(metrics(a, { ...b, estimatedInputTokens: null })[0].value, 'Not comparable');
   assert.equal(metrics(a, { ...b, succeeded: 2 })[0].value, 'Not comparable');
   assert.equal(metrics(a, { ...b, estimatedInputTokens: 0 })[0].value, '~0.00x baseline');
+  assert.equal(metrics(a, { ...b, latencySamples: 2 })[2].value, 'Not comparable');
+  assert.match(metrics(a, { ...b, latencySamples: undefined })[2].hint, /every planned run/);
 });

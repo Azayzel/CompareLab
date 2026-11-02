@@ -5,6 +5,8 @@ const { validateUsageTurns, usageReport } = require('../metrics/usage');
 const { validatePromptChanges, promptDecision } = require('./prompt-review');
 const { responseContent } = require('./response');
 const { validateToolSelection } = require('../tools/agent');
+const { evaluateChecks, comparisonDecision, validateReviewSettings } = require('./decision');
+const { validateVerification, verificationEvidence } = require('./verification');
 
 /**
  * Shared, dependency-free engine for the VS Code extension and CLI.
@@ -60,6 +62,13 @@ function reviewPacket(input, reversed = false) {
   if (missingTasks.length) throw new Error('Provide the original task for ' + missingTasks.join(' and ') + '. Enter a Shared prompt or the corresponding Prompt override.');
   if (!packet.A.trim() || !packet.B.trim()) throw new Error('Provide both responses before reviewing');
   const ordered = reversed ? { ...packet, taskA: packet.taskB, taskB: packet.taskA, A: packet.B, B: packet.A } : packet;
+  if (input.verificationResults) {
+    const { baseline, candidate, ...metadata } = input.verificationResults;
+    ordered.evidence += verificationEvidence({ ...metadata,
+      A: reversed ? candidate : baseline, B: reversed ? baseline : candidate });
+  }
+  if (input.resolutionEvidence) ordered.evidence += '\n\nADDITIONAL REVIEW EVIDENCE (collected after generation; not shown to either model)\n' + input.resolutionEvidence;
+  if (input.disputes) ordered.disputes = input.disputes;
   if (input.comparisonKind === 'prompt') {
     const original = resolvePrompt(input.prompt, input.baseline?.prompt);
     const edited = resolvePrompt(input.prompt, input.candidate?.prompt);
@@ -354,15 +363,6 @@ function assessFairness(a, b, comparisonMode = 'end-to-end', hasFrozenTestInputs
   };
 }
 
-function evaluateChecks(a, b, checks = {}) {
-  const phrases = Array.isArray(checks.requiredPhrases) ? checks.requiredPhrases : [];
-  return phrases.filter(p => typeof p === 'string' && p.trim()).map(phrase => ({
-    phrase,
-    baseline: a.response.toLowerCase().includes(phrase.toLowerCase()),
-    candidate: b.response.toLowerCase().includes(phrase.toLowerCase())
-  }));
-}
-
 function compare(input) {
   if (!input || typeof input !== 'object') throw new TypeError('Experiment must be an object');
   if (input.toolSelection !== undefined) validateToolSelection(input.toolSelection);
@@ -399,10 +399,13 @@ function compare(input) {
     comparisonKind: kind,
     testRun, testSummary: testRun ? summarizeTest(testRun) : null,
     baseline, candidate,
+    review: validateReviewSettings(input.review),
+    ...(input.verification ? { verification: validateVerification(input.verification) } : {}),
     ...(testRun?.plan.evidenceCollection || input.evidenceCollection ? {
       evidenceCollection: testRun?.plan.evidenceCollection || input.evidenceCollection
     } : {}),
     ...(kind === 'prompt' ? { promptComparison: {
+      effectiveChanged: baseline.prompt !== candidate.prompt,
       original: resolvePrompt(input.prompt, input.baseline?.prompt), edited: resolvePrompt(input.prompt, input.candidate?.prompt),
       spans: promptSpans, passages: changePassages(promptSpans)
     } } : {}),
@@ -425,6 +428,10 @@ function compare(input) {
 function asMarkdown(result) {
   const r = result;
   const lines = ['# CompareLab report', ''];
+  const decision = comparisonDecision(r);
+  if (r.evaluation) lines.push('## Decision readiness', '', 'Status: **' + decision.status + '**.',
+    ...decision.reasons.map(reason => '- ' + escapeMd(reason)), '',
+    'Required checks are acceptance gates, not proof of correctness. The evaluator judgment below is retained for audit.', '');
   if (r.comparisonKind === 'prompt') {
     const decision = promptDecision(r);
     lines.push('## Prompt edit review', '', '**' + decision.verdict + '** — ' + decision.action, '', decision.reason, '', decision.caveat, '',
@@ -442,6 +449,9 @@ function asMarkdown(result) {
     const summary = summarizeTest(test);
     lines.push('## Orchestrated test', '', 'Status: ' + test.status + '. ID: ' + escapeMd(test.id) + '.', '',
       'Task-specific preference: **' + summary.preference + '**. Planned paired runs: ' + test.plan.repetitions + '.',
+      summary.requiredCheckCount ? 'Acceptance: baseline passed required checks in ' + summary.acceptance.baseline.passed + '/' + summary.acceptance.baseline.total +
+      ' successful responses; candidate ' + summary.acceptance.candidate.passed + '/' + summary.acceptance.candidate.total + '.'
+        : 'No required checks configured; correctness is not independently verified.',
       'Supported pair preferences: baseline ' + summary.counts.baseline + ', candidate ' + summary.counts.candidate +
       ', unresolved ' + summary.counts.unresolved + ', incomplete ' + summary.counts.failed + '.', '', summary.note, '',
       'Evaluator requests in retained assessments: ' + summary.evaluatorRequests + '. Failed or cancelled reviews may also consume usage.', '',
@@ -457,7 +467,8 @@ function asMarkdown(result) {
     for (const warning of summary.warnings) lines.push('', '- ' + escapeMd(warning));
     for (const pair of test.pairs) {
       lines.push('', '### Paired run ' + pair.number, '',
-        'Generation order: ' + pair.order.join(' then ') + '. Baseline: ' + pair.baseline.status + '. Candidate: ' + pair.candidate.status + '.',
+        (test.plan.parallel ? 'Simultaneous generation (launch order): ' : 'Generation order: ') + pair.order.join(' then ') +
+        '. Baseline: ' + pair.baseline.status + '. Candidate: ' + pair.candidate.status + '.',
         'Review: ' + pair.evaluationStatus + '.', '', pair.evaluation ? escapeMd(pair.evaluation.summary) : 'No completed assessment.',
         pair.evaluationError ? escapeMd(pair.evaluationError) : '');
       for (const side of ['baseline', 'candidate']) {
@@ -479,7 +490,12 @@ function asMarkdown(result) {
   const verdictLabel = verdict => ({ baseline: 'Baseline better', candidate: 'Candidate better', tie: 'Tie',
     insufficient_evidence: 'Insufficient evidence' })[verdict] || 'Not evaluated';
   if (assessment) {
-    lines.push('**' + (assessment.verdict === 'baseline' ? 'Recommend Baseline' : assessment.verdict === 'candidate' ? 'Recommend Candidate' : verdictLabel(assessment.verdict)) + '**', '', assessment.summary, '', assessment.note, '',
+    lines.push('**' + (decision.preference ? 'Recommend ' + (decision.preference === 'baseline' ? 'Baseline' : 'Candidate')
+      : 'No supported recommendation (' + decision.status + ')') + '**',
+      '', 'Recommendation confidence: ' + (decision.confidence || 'none') + '. ' +
+      (decision.status === 'provisional' ? 'Provisional pick, not a proven improvement.' : 'Not statistical confidence.'),
+      '', 'Evaluator judgment (not the acceptance decision): ' +
+      (assessment.preferenceEstablished === false ? 'No established preference' : verdictLabel(assessment.verdict)) + '.', '', assessment.summary, '', assessment.note, '',
       'Evaluator: ' + escapeMd(assessment.model.name) + ' (' + escapeMd(assessment.model.id) + '), version ' + escapeMd(assessment.model.version),
       'Rubric version: ' + assessment.rubricVersion,
       'Response-order check: ' + (assessment.orderConsistent === null ? 'Not checked' : assessment.orderConsistent ? 'Same overall verdict' : 'Verdicts disagree'),
@@ -490,6 +506,8 @@ function asMarkdown(result) {
       for (const citation of item.citations) lines.push('Source: ' + citation.source, '', fencedText(citation.quote), '');
     }
     if (assessment.unknowns.length) lines.push('### Remaining unknowns', '', ...assessment.unknowns.map(value => '- ' + escapeMd(value)), '');
+    if (assessment.verification) lines.push('### Executable check observations', '', fencedText(JSON.stringify(assessment.verification, null, 2)), '');
+    if (assessment.resolution) lines.push('### Evidence resolution audit', '', fencedText(JSON.stringify(assessment.resolution, null, 2)), '');
     lines.push('### Per-order verdicts', '');
     for (const [index, judgment] of assessment.judgments.entries()) {
       lines.push('- ' + (index === 0 ? 'Original' : 'Reversed') + ' order: ' + verdictLabel(judgment.verdict) + '. ' + escapeMd(judgment.summary));
