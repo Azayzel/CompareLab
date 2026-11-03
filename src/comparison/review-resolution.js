@@ -1,7 +1,8 @@
 'use strict';
 const { verificationMatches } = require('./verification');
 
-async function resolveReview(input, { evaluate, collectEvidence, verify, progress = () => {}, cancelled = () => false }) {
+async function resolveReview(input, { evaluate, collectEvidence, verify, onVerification = () => {},
+  progress = () => {}, cancelled = () => false }) {
   const started = Date.now();
   let packet = { ...input };
   let verification;
@@ -9,6 +10,7 @@ async function resolveReview(input, { evaluate, collectEvidence, verify, progres
     progress('Running the selected checker against both frozen outputs in isolated containers.');
     verification = await verify(input);
     if (!verificationMatches(verification, input)) throw new Error('Executable check results do not match these outputs and checker.');
+    onVerification(verification);
     packet.verificationResults = verification;
   }
   let initial;
@@ -37,12 +39,12 @@ async function resolveReview(input, { evaluate, collectEvidence, verify, progres
     if (collectEvidence) {
       progress('Resolution round 1/1: gathering evidence for the disputed claims.');
       const collected = await collectEvidence(packet, disputes);
+      resolution.collection = collected.collection;
       if (typeof collected.evidence !== 'string' || Buffer.byteLength(collected.evidence) > 131072) {
         throw new Error('Resolution evidence exceeds the 128 KiB limit; no evidence was silently truncated.');
       }
       resolution.evidence = collected.evidence;
       resolution.evidenceStatus = 'collected';
-      resolution.collection = collected.collection;
     } else {
       resolution.evidenceStatus = 'unavailable';
       progress('No read-only evidence tools selected. Adjudicating the existing contract, outputs and any checker observations.');
@@ -63,7 +65,10 @@ async function resolveReview(input, { evaluate, collectEvidence, verify, progres
         ...(initial.orderConsistent === false ? ['The original response-order reviews disagreed; this adjudicated pick remains provisional.'] : []),
         ...(resolution.evidenceStatus === 'unavailable' ? ['No additional read-only tool evidence was available for adjudication.'] : [])])] });
   } catch (error) {
-    if (cancelled(error)) throw error;
+    if (cancelled(error)) {
+      if (verification) error.partialVerification = verification;
+      throw error;
+    }
     resolution.status = 'failed';
     const message = String(error.message || error);
     resolution.error = message.length > 2000 ? message.slice(0, 2000) + ' [error message truncated]' : message;

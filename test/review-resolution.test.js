@@ -7,6 +7,8 @@ const { reviewPacket, compare, asMarkdown } = require('../src/comparison/core');
 const { asHtml } = require('../src/reporting/html');
 const { createTestPlan, orchestrateTest, validateTestRecord, summarizeTest } = require('../src/comparison/orchestration');
 const { digest } = require('../src/comparison/verification');
+const { freezeEvidence } = require('../src/comparison/prompt-evidence');
+const { usageTurn } = require('../src/metrics/usage');
 
 const source = () => ({ prompt: 'Return the correct result.', evidence: 'The result must be 42.',
   review: { checkOrder: true, decisionPolicy: 'best-supported', resolveEvidence: true },
@@ -74,6 +76,30 @@ test('resolution failures are retained and cancellation never becomes a provisio
   assert.match(result.resolution.error, /server unavailable/);
   assert.ok(messages.some(message => /resolution failed/.test(message)));
   await assert.rejects(resolveReview(source(), { ...services, cancelled: () => true }), /server unavailable/);
+});
+
+test('formatted evidence exceeding 128 KiB retains completed collection requests and usage', async () => {
+  const collection = { model: 'judge', elapsedMs: 10, modelRequestCount: 2, toolCallCount: 1,
+    usageTurns: [1, 2].map(() => usageTurn({ provider: 'vscode', model: 'judge',
+      estimatedInputTokens: 12, estimatedOutputTokens: 4 })),
+    toolEvidence: [{ tool: 'read_fact', input: {}, collectedAt: new Date().toISOString(), content: 'x' }] };
+  const overhead = Buffer.byteLength(freezeEvidence(collection).evidence) - 1;
+  collection.toolEvidence[0].content = 'x'.repeat(131073 - overhead);
+  const frozen = freezeEvidence(collection);
+  assert.ok(Buffer.byteLength(JSON.stringify(collection.toolEvidence)) <= 131072);
+  assert.equal(Buffer.byteLength(frozen.evidence), 131073);
+  let requests = 0;
+  const result = await resolveReview(source(), {
+    evaluate: async () => { requests++; return assessment(); },
+    collectEvidence: async () => ({ evidence: frozen.evidence, collection: frozen.evidenceCollection })
+  });
+  assert.equal(requests, 1, 'Oversized evidence must not reach adjudication');
+  assert.equal(result.resolution.status, 'failed');
+  assert.match(result.resolution.error, /128 KiB/);
+  assert.equal(result.resolution.evidence, '');
+  assert.deepEqual(result.resolution.collection, frozen.evidenceCollection);
+  assert.equal(result.requestCount, 4);
+  assert.deepEqual(result.usageTurns, collection.usageTurns);
 });
 
 test('stable reviews and disabled follow-up do not incur extra requests', async () => {

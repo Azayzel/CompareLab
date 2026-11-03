@@ -1,7 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { composeAgentTask, createTestPlan, pairEvidence, orchestrateTest, summarizeTest, validateTestRecord } = require('../src/comparison/orchestration');
-const { compare } = require('../src/comparison/core');
+const { compare, asMarkdown } = require('../src/comparison/core');
+const { comparisonDecision } = require('../src/comparison/decision');
 const { codeMindAlert } = require('../src/comparison/inputs');
 
 const experiment = () => ({ prompt: 'Diagnose the failed requests.', evidence: 'HTTP 401 increased; no deployment occurred.',
@@ -418,6 +419,12 @@ test('historical budget-limited records keep their original fingerprints, warnin
   assert.equal(summary.preference, 'inconclusive');
   assert.equal(summary.counts.unresolved, 1);
   assert.match(summary.warnings.join(' '), /truncated/);
+  const reopened = compare(displayed);
+  reopened.evaluation = { ...record.pairs[0].evaluation, verdict: 'candidate', preferenceEstablished: true,
+    orderConsistent: true, criteria: [{ criterion: 'grounding', verdict: 'candidate', citations: [] }] };
+  assert.equal(comparisonDecision(reopened).status, 'blocked');
+  assert.match(asMarkdown(reopened), /incomplete or truncated evidence/);
+  assert.doesNotMatch(asMarkdown(reopened), /\*\*Recommend Candidate\*\*/);
   for (const corrupt of [
     result => { result.toolEvidence[0].retainedCharacters++; },
     result => { result.investigationBudget.evidenceCharacters++; },

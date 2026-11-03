@@ -4,6 +4,8 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { createHistory, HISTORY_LIMITS } = require('../src/records/history');
+const { compare } = require('../src/comparison/core');
+const { digest } = require('../src/comparison/verification');
 
 const comparison = title => ({ prompt: title, baseline: { model: 'baseline', response: 'First response' },
   candidate: { model: 'candidate', response: 'Second response' } });
@@ -28,6 +30,29 @@ test('snapshots survive new store instances and listing returns metadata without
   assert.equal(list.totalBytes, (await fs.stat(path.join(root, entry.id + '.json'))).size);
   if (process.platform !== 'win32') assert.equal((await fs.stat(path.join(root, entry.id + '.json'))).mode & 0o777, 0o600);
   assert.ok((await fs.readdir(root)).every(file => file.endsWith('.json')));
+});
+
+test('completed direct checks survive disk history without a quality assessment and reject stale bindings', async t => {
+  const root = await directory(t);
+  const input = { ...comparison('Completed checks, failed evaluator'),
+    verification: { kind: 'node-commonjs', name: 'checker.cjs', source: 'trusted checker', timeoutSeconds: 30 } };
+  const observation = side => ({ status: 'passed', responseHash: digest(input[side].response),
+    detail: 'One passing check', tests: 1, passed: 1, failed: 0, exitCode: 0 });
+  input.verificationResults = { image: 'sha256:' + 'a'.repeat(64), checkerHash: digest(input.verification.source),
+    baseline: observation('baseline'), candidate: observation('candidate') };
+  const { entry } = await createHistory(root).save(input);
+  const reopened = await createHistory(root).get(entry.id);
+  assert.equal(reopened.evaluation, null);
+  assert.deepEqual(compare(reopened.experiment).verificationResults, input.verificationResults);
+  for (const corrupt of [
+    value => { value.verification.source = 'different checker'; },
+    value => { value.baseline.response = 'different answer'; },
+    value => { value.verificationResults.candidate.detail = 'x'.repeat(65537); }
+  ]) {
+    const altered = structuredClone(reopened.experiment);
+    corrupt(altered);
+    assert.throws(() => compare(altered), /Executable check observations do not match/);
+  }
 });
 
 test('keeps at most the latest 50 entries and removes the oldest', async t => {

@@ -6,7 +6,7 @@ const { validatePromptChanges, promptDecision } = require('./prompt-review');
 const { responseContent } = require('./response');
 const { validateToolSelection } = require('../tools/agent');
 const { evaluateChecks, comparisonDecision, validateReviewSettings } = require('./decision');
-const { validateVerification, verificationEvidence } = require('./verification');
+const { validateVerification, verificationMatches, verificationEvidence } = require('./verification');
 
 /**
  * Shared, dependency-free engine for the VS Code extension and CLI.
@@ -298,6 +298,8 @@ function describeVariant(input = {}) {
     runId: input.runId ? String(input.runId) : null,
     responseRedacted: input.responseRedacted === true,
     responseTruncated: input.responseTruncated === true,
+    ...(input.investigationBudget ? { investigationBudget: input.investigationBudget } : {}),
+    ...(input.toolEvidence ? { toolEvidence: input.toolEvidence } : {}),
     executionTrace: validateTrace(input.executionTrace),
     usageTurns, usage: usageReport(usageTurns || [])
   };
@@ -370,6 +372,10 @@ function compare(input) {
   const kind = comparisonKind(input);
   const baseline = describeVariant({ ...input.baseline, prompt: composeAgentTask(resolvePrompt(input.prompt, input.baseline?.prompt), input.incomingMessage) });
   const candidate = describeVariant({ ...input.candidate, prompt: composeAgentTask(resolvePrompt(input.prompt, input.candidate?.prompt), input.incomingMessage) });
+  const verification = validateVerification(input.verification);
+  if (input.verificationResults != null && !verificationMatches(input.verificationResults, { verification, baseline, candidate })) {
+    throw new Error('Executable check observations do not match these outputs and checker.');
+  }
   const spans = diffText(baseline.response, candidate.response);
   const promptSpans = kind === 'prompt'
     ? diffText(resolvePrompt(input.prompt, input.baseline?.prompt), resolvePrompt(input.prompt, input.candidate?.prompt)) : null;
@@ -400,7 +406,8 @@ function compare(input) {
     testRun, testSummary: testRun ? summarizeTest(testRun) : null,
     baseline, candidate,
     review: validateReviewSettings(input.review),
-    ...(input.verification ? { verification: validateVerification(input.verification) } : {}),
+    ...(verification ? { verification } : {}),
+    ...(input.verificationResults ? { verificationResults: input.verificationResults } : {}),
     ...(testRun?.plan.evidenceCollection || input.evidenceCollection ? {
       evidenceCollection: testRun?.plan.evidenceCollection || input.evidenceCollection
     } : {}),
@@ -508,13 +515,14 @@ function asMarkdown(result) {
       for (const citation of item.citations) lines.push('Source: ' + citation.source, '', fencedText(citation.quote), '');
     }
     if (assessment.unknowns.length) lines.push('### Remaining unknowns', '', ...assessment.unknowns.map(value => '- ' + escapeMd(value)), '');
-    if (assessment.verification) lines.push('### Executable check observations', '', fencedText(JSON.stringify(assessment.verification, null, 2)), '');
     if (assessment.resolution) lines.push('### Evidence resolution audit', '', fencedText(JSON.stringify(assessment.resolution, null, 2)), '');
     lines.push('### Per-order verdicts', '');
     for (const [index, judgment] of assessment.judgments.entries()) {
       lines.push('- ' + (index === 0 ? 'Original' : 'Reversed') + ' order: ' + verdictLabel(judgment.verdict) + '. ' + escapeMd(judgment.summary));
     }
   } else lines.push('Not evaluated. Text differences and phrase checks do not establish response quality.');
+  const verification = assessment?.verification || r.verificationResults;
+  if (verification) lines.push('', '### Executable check observations', '', fencedText(JSON.stringify(verification, null, 2)), '');
   lines.push('', '## Recorded runs', '',
     '| | Baseline | Candidate |', '|---|---|---|',
     '| Model | ' + escapeMd(r.baseline.model) + ' | ' + escapeMd(r.candidate.model) + ' |',

@@ -490,6 +490,17 @@ test('test history renders retained verification when its evaluator fails', () =
   assert.match(text, /Expected 42/);
 });
 
+test('standalone investigation metadata survives webview restoration and export', () => {
+  const input = experiment();
+  input.baseline.investigationBudget = { limited: true };
+  input.candidate.toolEvidence = [{ tool: 'read_fact', content: 'Partial evidence', truncated: true }];
+  const panel = webview(input);
+  panel.click('export');
+  const exported = panel.messages.at(-1).experiment;
+  assert.equal(exported.baseline.investigationBudget.limited, true);
+  assert.equal(exported.candidate.toolEvidence[0].truncated, true);
+});
+
 test('ordinary recommendations highlight only the preferred model and clear stale highlights', () => {
   const input = experiment();
   const panel = webview(input);
@@ -1542,7 +1553,81 @@ test('executable checker approval, observations and configuration survive orches
   assert.equal(panel.state().verification, undefined);
 });
 
-test('reviewing existing outputs can collect selected read-only evidence once and retain the adjudication', async () => {
+for (const workflow of ['evaluate', 'orchestrate']) {
+  for (const failure of ['error', 'timeout', 'cancelled']) {
+    test(workflow + ' retains completed checks after evaluator ' + failure, async t => {
+      if (failure === 'timeout') t.mock.timers.enable({ apis: ['setTimeout'] });
+      const { digest } = require('../src/comparison/verification');
+      const { compare, asMarkdown } = require('../src/comparison/core');
+      const { asHtml } = require('../src/reporting/html');
+      let started, observations, verified = 0;
+      const ready = new Promise(resolve => { started = resolve; });
+      const input = { ...experiment(), test: { repetitions: 1, modelTimeoutSeconds: 30 },
+        baseline: { provider: 'ollama', model: 'one', response: 'First answer.' },
+        candidate: { provider: 'ollama', model: 'two', response: 'Second answer.' },
+        verification: { kind: 'node-commonjs', name: 'checker.cjs', source: 'trusted checker', timeoutSeconds: 30 } };
+      const instance = host({
+        evaluateWithCopilot: async () => {
+          started();
+          if (failure === 'error') throw new Error('Evaluator quota exceeded');
+          return new Promise(() => {});
+        }
+      }, { runModel: async request => ({ ...request,
+        response: request.model === 'one' ? input.baseline.response : input.candidate.response }) }, {}, {
+        prepareVerification: async () => 'sha256:' + 'a'.repeat(64),
+        verifyPair: async (packet, image) => {
+          verified++;
+          const observation = side => ({ responseHash: digest(packet[side].response), status: 'passed',
+            detail: 'Completed isolated check', tests: 1, passed: 1, failed: 0, exitCode: 0 });
+          observations = { image, checkerHash: digest(packet.verification.source),
+            baseline: observation('baseline'), candidate: observation('candidate') };
+          return observations;
+        }
+      });
+      instance.vscode.window.showWarningMessage = async () => 'Run isolated checks';
+      let panel = webview(input);
+      const pending = instance.send({ type: workflow, experiment: input, revision: panel.messages.at(-1).revision });
+      await ready;
+      if (failure === 'timeout') t.mock.timers.tick(30000);
+      if (failure === 'cancelled') await instance.send({ type: 'cancelReview' });
+      await pending;
+      let retained;
+      if (workflow === 'orchestrate') {
+        retained = instance.messages.findLast(message => message.type === 'testFinished').experiment;
+        const pair = retained.testRun.pairs[0];
+        assert.equal(pair.evaluationStatus, failure === 'cancelled' ? 'cancelled' : 'failed');
+        assert.equal(pair.evaluation, null);
+        assert.deepEqual(pair.verification, observations);
+        panel = webview(retained);
+        await instance.send(panel.messages.at(-1));
+      }
+      const message = instance.messages.findLast(message => message.type === 'result');
+      assert.ok(message, 'Completed checks should be displayed even without an assessment');
+      assert.equal(message.result.evaluation, null);
+      if (workflow === 'evaluate') assert.deepEqual(message.result.verificationResults, observations);
+      panel.receive(message);
+      assert.match(visibleText(panel.field(workflow === 'evaluate' ? 'evaluation' : 'testResults')), /Completed isolated check/);
+      panel.click('historySave');
+      await instance.send(panel.messages.at(-1));
+      const saved = instance.historyEntries.at(-1);
+      assert.equal(saved.evaluation, null);
+      retained = saved.experiment;
+      assert.deepEqual(workflow === 'evaluate' ? retained.verificationResults : retained.testRun.pairs[0].verification, observations);
+      panel = webview(retained);
+      panel.click('export');
+      await instance.send(panel.messages.at(-1));
+      const exported = JSON.parse(instance.files.at(-1));
+      assert.deepEqual(workflow === 'evaluate' ? exported.verificationResults : exported.testRun.pairs[0].verification, observations);
+      const report = compare(exported);
+      assert.match(asMarkdown(report), /Completed isolated check/);
+      assert.match(asHtml(report, { css: '', markdownScript: '' }), /Completed isolated check/);
+      assert.equal(verified, 1, 'History, restoration and exports must not rerun checks');
+      assert.equal(instance.messages.findLast(message => message.type === 'busy').value, false);
+    });
+  }
+}
+
+test('review evidence retains rejected requests in the audit but not in adjudication evidence', async () => {
   let reviews = 0, turns = 0, invocations = 0;
   const base = { verdict: 'candidate', preferenceEstablished: true, orderConsistent: false, summary: 'Disputed result',
     unknowns: [], judgments: [], inputTokenEstimates: [], requestCount: 2, citationRepairs: 0, usageTurns: [],
@@ -1554,27 +1639,40 @@ test('reviewing existing outputs can collect selected read-only evidence once an
       reviews++;
       if (reviews === 2) {
         assert.match(input.resolutionEvidence, /Observed 42/);
+        assert.doesNotMatch(input.resolutionEvidence, /Invalid arguments|invalidQuery/);
         assert.equal(input.review.checkOrder, false);
       }
       return { ...base, inputFingerprint: evaluationKey(input) };
     },
-    runWithVsCode: async () => ++turns === 1 ? { model: 'judge', toolCalls: [{ callId: 'read-1', name: 'read_fact', input: {} }] }
+    runWithVsCode: async () => ++turns <= 2 ? { model: 'judge',
+      toolCalls: [{ callId: 'read-' + turns, name: 'read_fact', input: turns === 1 ? { invalidQuery: true } : {} }] }
       : { model: 'judge', response: 'Collected the observation.' }
   });
   class Text { constructor(value) { this.value = value; } }
   instance.vscode.LanguageModelTextPart = Text;
   instance.vscode.lm = { tools: [{ name: 'read_fact', description: 'Read an observation', inputSchema: { type: 'object' } }],
-    invokeTool: async () => { invocations++; return { content: [new Text('Observed 42')] }; } };
+    invokeTool: async () => {
+      if (++invocations === 1) throw new Error('MCP -32602: Invalid arguments: use a valid query');
+      return { content: [new Text('Observed 42')] };
+    } };
   instance.vscode.window.showWarningMessage = async () => 'Allow request';
   const input = { ...experiment(), toolSelection: ['read_fact'], review: { decisionPolicy: 'best-supported', resolveEvidence: true } };
   await instance.send({ type: 'evaluate', experiment: input });
   assert.deepEqual(instance.errors, []);
-  assert.equal(invocations, 1);
+  assert.equal(invocations, 2);
   assert.equal(reviews, 2);
-  assert.equal(turns, 2);
+  assert.equal(turns, 3);
   const result = instance.messages.findLast(message => message.type === 'result').result;
   assert.equal(result.evaluation.resolution.status, 'completed');
   assert.match(result.evaluation.resolution.evidence, /Observed 42/);
+  const collection = result.evaluation.resolution.collection;
+  assert.equal(collection.toolEvidence.length, 2);
+  assert.equal(collection.toolEvidence[0].isError, true);
+  assert.equal(collection.toolEvidence[0].input.invalidQuery, true);
+  assert.match(collection.toolEvidence[0].content, /Invalid arguments/);
+  assert.equal(collection.toolEvidence[1].content, 'Observed 42');
+  assert.equal(collection.modelRequestCount, 3);
+  assert.equal(collection.toolCallCount, 2);
 });
 
 test('generation diagnostics identify runtime and requests without retaining request content or raw errors', async () => {

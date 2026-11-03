@@ -324,9 +324,12 @@ function summarizeTest(record) {
       else warnings.add(warning.message);
     }
     const checks = decision.checks;
+    const verification = pair.evaluation?.verification || pair.verification;
+    const matchedVerification = verificationMatches(verification, {
+      verification: record.plan.verification, baseline: pair.baseline.result, candidate: pair.candidate.result
+    });
     for (const side of ['baseline', 'candidate']) {
-      const verification = pair.evaluation?.verification || pair.verification;
-      if (record.plan.verification && verification?.[side]?.status !== 'passed') {
+      if (record.plan.verification && (!matchedVerification || verification[side].status !== 'passed')) {
         verificationFailures.add(side);
       }
     }

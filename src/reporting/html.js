@@ -127,7 +127,7 @@ function asHtml(result, { css, markdownScript, logoPng }) {
     ${decision.checks.map(check => `<p class="notice">${escape(check.phrase)}: baseline ${check.baseline ? 'Pass' : 'Fail'}, candidate ${check.candidate ? 'Pass' : 'Fail'}</p>`).join('')}
     ${pair.evaluationError ? `<p class="warning-callout">${escape(pair.evaluationError)}</p>` : ''}</div></section>`;
   }).join('')
-    : `<section class="report-run"><h2>Quality review</h2>${assessment(result.evaluation, decision)}<h2 class="section-title">Model reports</h2>
+    : `<section class="report-run"><h2>Quality review</h2>${assessment(result.evaluation, decision, result.verificationResults)}<h2 class="section-title">Model reports</h2>
       <div class="readable-responses">${['baseline', 'candidate'].map(side =>
     response(side, result[side], result[side].response ? 'Received' : 'Missing', winner, undefined,
       preferredBadge(decision))).join('')}</div></section>`;

@@ -358,6 +358,7 @@ Optional top-level `evidence` contains the source snapshot and `review.checkOrde
 - **Required phrases** are case-insensitive substring checks on the visible response, excluding recognized provider-envelope metadata. A judged winner that misses a required phrase cannot be recommended. This does not automatically award the other side a win.
 - Repeated tests show pass counts across successful responses. A side that fails a required check in any successful response cannot receive the aggregate recommendation. Errors remain errors, not acceptance passes.
 - Acceptance is recomputed from retained outputs and configured checks when reopening records; saved pass/fail booleans are not trusted. UI, Markdown, and HTML preserve the original evaluator judgment separately from recommendation readiness.
+- Budget-limited investigations and truncated tool evidence block recommendations in individual, reopened, and standalone reviews. Repeated recommendations also require matching output/checker bindings for every pair; a majority cannot hide stale executable observations.
 - Prompt edits that produce identical effective model instructions cannot be labeled **Better** or **Worse**, even if metadata and sampled outputs differ.
 - Latency ratios require valid paired timing for every planned run. Partial timing samples remain visible but are not presented as a complete speed comparison.
 
@@ -373,6 +374,8 @@ Enable **Advanced settings -> Resolve inconclusive reviews** for one follow-up r
 
 If no suitable tools are selected, the adjudicator re-examines the supplied contract, outputs and checker observations and explicitly reports that no new tool evidence was obtained. It cannot manufacture facts. Original reviews, new observations, failures, usage and the adjudication remain in the audit details and exports. Later evidence is never retroactively inserted into generation inputs. An adjudicated recommendation does not erase the original order disagreement; confidence remains low when that matters. Prompt adoption still distinguishes a practical pick from an established instruction improvement.
 
+The collection audit retains rejected tool requests and their errors, even when a later corrected request succeeds; only successful observations go to adjudication. Completed collection requests and token usage remain counted if the formatted evidence exceeds the size limit and is rejected.
+
 ### Optional isolated executable checks
 
 1. Prepare a trusted, dependency-free CommonJS checker using `node:test`. It receives the generated module path in `process.argv[2]`; see [the scheduler checker](../examples/check-async-scheduler.cjs). Answers must contain exactly one JavaScript/CommonJS fenced code block.
@@ -380,6 +383,8 @@ If no suitable tools are selected, the adjudicator re-examines the supplied cont
 3. Use **Advanced settings -> Select executable checker**. The checker is snapshotted into the experiment, including its source; review it before sharing exports. The default per-answer deadline is 30 seconds; imported configurations may specify 5-120 seconds.
 4. Approve execution for each comparison/review. Each answer runs in a separate container using the resolved image ID, with no network, read-only root and input mounts, no workspace/credential/Docker-socket mounts, a non-root user, dropped capabilities, and CPU/memory/process/output limits. Containers and temporary files are removed afterward, including after cancellation or timeouts.
 5. Inspect **Executable check observations**. Both the checker and exact visible answers are hash-bound to results. Exit zero alone is not a pass: the Node test runner must report passing tests. Failed, timed-out, missing or mismatched checks block recommendation of that answer. Passing limited tests is not proof of general correctness.
+
+Completed checker observations survive later evaluator errors, review timeouts, and cancellation without rerunning the answers. This applies to both paired tests and **Review existing responses**: observations remain visible and can be saved to history or exported as JSON, Markdown, or HTML even without a quality assessment. Standalone observations use the optional top-level `verificationResults` field; changed answers or checker source cannot reuse those results.
 
 Docker is optional for everything else. Container isolation is not a guarantee against deliberately hostile code, and code sharing a process with a checker can attempt to interfere with tests. Use a disposable Docker environment for adversarial outputs; review checkers and avoid secrets in them. Results in imported JSON are user-supplied records, not signed attestations. No generated code is ever silently run on the host as a fallback.
 

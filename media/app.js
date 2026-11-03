@@ -24,6 +24,7 @@
   let evidenceCollection = null;
   let toolSelection = [];
   let verification = null;
+  let verificationResults = null;
   let reviewOptions = { decisionPolicy: 'best-supported', resolveEvidence: true };
 
 
@@ -55,6 +56,7 @@
       ...(evidenceCollection ? { evidenceCollection } : {}),
       review: { ...reviewOptions, checkOrder: $('checkOrder').checked },
       ...(verification ? { verification } : {}),
+      ...(verificationResults ? { verificationResults } : {}),
       test: { repetitions: Number($('testRepetitions').value || 3),
         parallel: $('parallelModels').checked, modelTimeoutSeconds: Number($('modelTimeoutSeconds').value) }, testRun,
       checks: { requiredPhrases: $('checks').value.split(',').map(x => x.trim()).filter(Boolean) },
@@ -121,11 +123,14 @@
         estimatedOutputTokens: variant?.estimatedOutputTokens ?? null,
         usageTurns: variant?.usageTurns ?? null,
         responseRedacted: variant?.responseRedacted === true, responseTruncated: variant?.responseTruncated === true,
+        ...(variant?.investigationBudget ? { investigationBudget: variant.investigationBudget } : {}),
+        ...(variant?.toolEvidence ? { toolEvidence: variant.toolEvidence } : {}),
         executionTrace: variant?.executionTrace ?? null
       };
     }
     fill('checks', Array.isArray(data.checks?.requiredPhrases) ? data.checks.requiredPhrases.filter(value => typeof value === 'string').join(', ') : '');
     invalidate();
+    verificationResults = data.verificationResults || null;
     testRun = data.testRun ?? null;
     if (testRun) renderTest(testRun);
     for (const side of ['a', 'b']) updateRunner(side);
@@ -235,6 +240,7 @@
     $('evaluation').replaceChildren();
     $('reviewStatus').textContent = '';
     testRun = null;
+    verificationResults = null;
     $('testResults').hidden = true;
     $('historySaveStatus').textContent = '';
     revealHistoryResult = false;
@@ -650,15 +656,17 @@
       container.appendChild(detail);
     }
   }
-  function renderEvaluation(assessment, record, decision) {
+  function renderEvaluation(assessment, record, decision, observations) {
     const container = $('evaluation');
     container.replaceChildren();
     if (!assessment) {
       const empty = make('div', '', 'review-empty');
-      empty.append(make('h3', record ? 'No quality review available' : 'Ready for a quality review'),
-        make('p', record ? 'A review appears after both models return responses and the evaluator completes. Available model reports are shown below.'
+      empty.append(make('h3', record || observations ? 'No quality review available' : 'Ready for a quality review'),
+        make('p', observations ? 'Executable checks completed, but no quality review is available. These observations do not establish a winner.'
+          : record ? 'A review appears after both models return responses and the evaluator completes. Available model reports are shown below.'
           : 'Use Evaluate with Copilot to assess the responses against your source evidence. Text differences alone are not a quality score.'));
       container.appendChild(empty);
+      renderReviewEvidence(container, { verification: observations });
       return;
     }
     container.append(make('h3', decision?.preference === 'baseline' ? 'Recommend Baseline'
@@ -674,7 +682,7 @@
       : assessment.orderConsistent ? 'Same overall verdict in both orders' : 'Verdicts disagree';
     container.appendChild(make('p', 'Response-order check: ' + order, 'notice'));
     renderCriteria(container, assessment.criteria);
-    renderReviewEvidence(container, assessment);
+    renderReviewEvidence(container, { ...assessment, verification: assessment.verification || observations });
     if (assessment.unknowns.length) {
       container.appendChild(make('h3', 'Remaining unknowns'));
       const list = make('ul', '');
@@ -715,7 +723,7 @@
     if (result.testRun) renderTest(result.testRun, result.testSummary);
     else $('testResults').hidden = true;
     $('results').hidden = false;
-    renderEvaluation(result.evaluation, result.testRun, result.decision);
+    renderEvaluation(result.evaluation, result.testRun, result.decision, result.verificationResults);
     const selectedPair = result.testRun?.pairs.findLast(pair => pair.baseline.status === 'succeeded' && pair.candidate.status === 'succeeded') || result.testRun?.pairs.at(-1);
     $('responseHeading').textContent = selectedPair ? 'Model reports from Run ' + selectedPair.number : 'Model reports';
     $('responseDescription').textContent = selectedPair
@@ -931,6 +939,8 @@
       post('compare');
     }
     if (msg.type === 'result' && msg.revision === revision) {
+      verificationResults = msg.result.verificationResults || null;
+      save();
       render(msg.result);
       if (revealHistoryResult && activeView !== 'history') {
         const target = $(comparisonKind === 'prompt' ? 'promptResults' : msg.result.testRun ? 'testResults' : 'results');

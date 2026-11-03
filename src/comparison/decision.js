@@ -79,6 +79,11 @@ function assessmentDecision(assessment, { checks = [], fairness, effectivePrompt
     reasons: [...new Set([...blocked, ...reasons])] };
 }
 
+function investigationLimited(baseline, candidate) {
+  return [baseline, candidate].some(result => result?.investigationBudget?.limited ||
+    result?.toolEvidence?.some(item => item.truncated));
+}
+
 function pairDecision(plan, pair) {
   const checks = evaluateChecks(pair.baseline.result || {}, pair.candidate.result || {}, plan.checks);
   if (pair.evaluationStatus !== 'succeeded') return { ...assessmentDecision(null), checks };
@@ -91,15 +96,18 @@ function pairDecision(plan, pair) {
     fairness: pair.fairness,
     effectivePromptChanged: plan.comparisonKind === 'prompt' && original && edited
       ? original.prompt !== edited.prompt || (original.systemPrompt || '') !== (edited.systemPrompt || '') : undefined,
-    limited: ['baseline', 'candidate'].some(side => pair[side].result?.investigationBudget?.limited ||
-      pair[side].result?.toolEvidence?.some(item => item.truncated))
+    limited: investigationLimited(pair.baseline.result, pair.candidate.result)
   }), checks };
 }
 
 function comparisonDecision(result) {
+  const pair = result.testRun?.pairs.findLast(pair => pair.baseline.status === 'succeeded' && pair.candidate.status === 'succeeded') ||
+    result.testRun?.pairs.at(-1);
   return assessmentDecision(result.evaluation, { checks: result.checks, fairness: result.fairness,
     policy: result.review?.decisionPolicy || 'strict',
     verificationInput: result,
+    limited: investigationLimited(result.baseline, result.candidate) ||
+      investigationLimited(pair?.baseline.result, pair?.candidate.result),
     effectivePromptChanged: result.promptComparison?.effectiveChanged });
 }
 

@@ -6,6 +6,7 @@ const { compare, asMarkdown } = require('../src/comparison/core');
 const { orchestrateTest, summarizeTest, validateTestRecord } = require('../src/comparison/orchestration');
 const { promptDecision } = require('../src/comparison/prompt-review');
 const { asHtml } = require('../src/reporting/html');
+const { digest } = require('../src/comparison/verification');
 
 const review = (verdict = 'candidate') => ({
   verdict, preferenceEstablished: true, orderConsistent: true, summary: 'Cited evidence supports this response.',
@@ -70,6 +71,29 @@ test('direct review exports preserve the judge but suppress recommendations that
   assert.equal(result.evaluation.verdict, 'candidate');
 });
 
+test('standalone reviews retain investigation limits and enforce them in every recommendation policy', () => {
+  for (const policy of ['strict', 'best-supported']) {
+    for (const side of ['baseline', 'candidate']) {
+      for (const metadata of [
+        { investigationBudget: { limited: true, reasons: ['The investigation reached its evidence limit.'] } },
+        { toolEvidence: [{ tool: 'read_fact', content: 'Partial evidence', truncated: true }] }
+      ]) {
+        const source = input();
+        source.checks.requiredPhrases = [];
+        source.review = { decisionPolicy: policy };
+        assert.equal(comparisonDecision({ ...compare(source), evaluation: review() }).preference, 'candidate');
+        Object.assign(source[side], metadata);
+        const result = { ...compare(source), evaluation: review() };
+        for (const key of Object.keys(metadata)) assert.deepEqual(result[side][key], metadata[key]);
+        assert.equal(comparisonDecision(result).status, 'blocked');
+        assert.match(asMarkdown(result), /incomplete or truncated evidence/);
+        assert.doesNotMatch(asMarkdown(result), /\*\*Recommend Candidate\*\*/);
+        assert.match(asHtml(result, { css: '', markdownScript: '' }), /incomplete or truncated evidence/);
+      }
+    }
+  }
+});
+
 test('repeated and imported decisions recompute acceptance from outputs rather than saved check booleans', async () => {
   const source = input();
   const record = await run(source);
@@ -127,6 +151,37 @@ test('a majority cannot hide a required-check failure in a losing pair', async (
   assert.equal(summary.acceptance.candidate.failed, 1);
   assert.equal(summary.preference, 'inconclusive');
   assert.match(summary.warnings.join(' '), /cannot be recommended/);
+});
+
+test('a majority cannot hide stale executable observations when a record is reopened', async () => {
+  const source = input();
+  source.checks.requiredPhrases = [];
+  source.verification = { kind: 'node-commonjs', name: 'checker.cjs', source: 'trusted checker', timeoutSeconds: 30 };
+  const observation = side => ({ status: 'passed', responseHash: digest(source[side].response),
+    detail: 'One passing check', tests: 1, passed: 1, failed: 0, exitCode: 0 });
+  const record = await run(source, { ...review(), verification: {
+    image: 'sha256:' + 'a'.repeat(64), checkerHash: digest(source.verification.source),
+    baseline: observation('baseline'), candidate: observation('candidate')
+  } });
+  assert.equal(summarizeTest(record).preference, 'candidate');
+  for (const corrupt of [
+    value => { value.checkerHash = digest('different checker'); },
+    value => { value.baseline.responseHash = digest('different baseline'); },
+    value => { value.candidate.responseHash = digest('different candidate'); }
+  ]) {
+    const imported = JSON.parse(JSON.stringify(record));
+    corrupt(imported.pairs[1].evaluation.verification);
+    for (const value of [imported, validateTestRecord(imported)]) {
+      const summary = summarizeTest(value);
+      assert.equal(summary.counts.candidate, 2);
+      assert.equal(summary.pairDecisions[1].status, 'blocked');
+      assert.equal(summary.preference, 'inconclusive');
+      assert.match(summary.warnings.join(' '), /executable checks.*cannot be recommended/);
+    }
+  }
+  const losingFailure = JSON.parse(JSON.stringify(record));
+  losingFailure.pairs[1].evaluation.verification.baseline.status = 'failed';
+  assert.equal(summarizeTest(losingFailure).preference, 'candidate', 'A valid failed check only disqualifies that side');
 });
 
 test('timing ratios require observations for every pair, excluding incomplete and negative timings', async () => {
