@@ -58,6 +58,60 @@ See the [official trusted publishing setup](https://code.visualstudio.com/api/wo
 - If Marketplace publication succeeded but GitHub publication failed, a retry accepts that existing Marketplace version and completes the GitHub Release. A completed release is a no-op on rerun.
 - Resolve failed releases before merging more changes. If a newer commit has already been tagged, an older unfinished release is intentionally blocked; inspect its draft rather than moving tags or publishing stale code.
 
+## Automated issue triage
+
+[issue-triage.yml](.github/workflows/issue-triage.yml) handles newly opened,
+human-authored GitHub issues. It invokes
+[issue-triage.agent.md](.github/agents/issue-triage.agent.md) with Copilot CLI to
+inspect the triggering default-branch commit and relevant tests, then posts an
+AI-disclosed comment with findings, source links, questions, and next steps.
+GitHub delivers the issue event directly to Actions; no external webhook
+endpoint is needed. Edits, comments, reopened issues, and bot-authored issues
+do not trigger runs.
+
+### Enable triage
+
+1. Create a fine-grained personal access token for a Copilot-enabled account
+   with the **Copilot Requests** permission. Store it as the Actions repository
+   secret **COPILOT_GITHUB_TOKEN** under **Settings > Secrets and variables >
+   Actions**. Do not put the token in an issue, source file, or agent prompt.
+   The token does not need repository write permissions. Your account and
+   organization policies must permit Copilot CLI use.
+2. Ensure Actions policies allow `contents: read` and `issues: write`. The
+   workflow uses the built-in `GITHUB_TOKEN` only for checkout and the separate
+   comment-publishing step, not for model tools.
+3. Merge the agent, workflow, and runner into the default branch. Open a new
+   issue with a sanitized report and inspect **Actions > Issue Triage** and
+   the resulting issue comment. Existing issues are not backfilled.
+
+The model can read and search local source, but cannot execute commands, edit
+files, or use GitHub/MCP tools. Investigation is static: it does not run tests
+or reproduce the report. The runner passes issue text as JSON data, not shell
+code. It validates the draft before publishing, skips closed issues, and
+updates its marked `github-actions[bot]` comment on reruns instead of posting
+duplicates. It never labels, assigns, closes issues, or creates pull requests.
+These are maintainer automation permissions, not a change to CompareLab's
+interactive read-only tool policy.
+
+Every qualifying issue can consume the token owner's Copilot allowance and
+Actions minutes, including reports from outside contributors. The workflow has
+a 15-minute timeout and the model invocation an 8-minute timeout; these are not
+spending caps. Monitor usage, or disable **Issue Triage** in Actions to stop new
+runs. Prompt-injection instructions and tool restrictions reduce risk but do
+not guarantee factual accuracy or prevent inappropriate generated text; review
+public comments, particularly reports involving security or sensitive data.
+
+If authentication, generation, draft validation, or GitHub publication fails,
+the run fails without posting a fallback diagnosis. Correct the configuration
+and rerun the original run; reruns use that run's original code and issue
+snapshot. A code fix requires a new issue event after the fix is merged.
+The CLI is pinned in the workflow; review and validate version upgrades.
+
+Run `node --test test/issue-triage.test.js` for mocked event, tool-boundary,
+failure, pagination, and rerun checks. `npm run build` includes those tests but
+does not validate live Copilot authentication, investigation quality, or GitHub
+comment permissions.
+
 ## Icons and sidebar
 
 [media/comparelab.svg](media/comparelab.svg) is the artwork source and Activity Bar icon. The sidebar is a launcher for the existing editor, not a second comparison interface. VS Code may tint its Activity Bar icon to match the theme.

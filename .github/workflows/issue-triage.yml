@@ -1,0 +1,47 @@
+name: Issue Triage
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-triage-${{ github.repository }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    if: github.event.issue.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Check Copilot authentication configuration
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
+            echo '::error::Configure the COPILOT_GITHUB_TOKEN Actions secret with Copilot Requests permission.'
+            exit 1
+          fi
+      - name: Install pinned Copilot CLI
+        run: npm install --global @github/copilot@1.0.105
+      - name: Investigate issue and draft comment
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: node scripts/issue-triage.js draft
+      - name: Publish triage comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/issue-triage.js publish
