@@ -3,8 +3,24 @@
 const { usageTurn } = require('../../metrics/usage');
 const { assertCallableModel } = require('./models');
 const { MAX_PROMPT_CHARACTERS, MAX_RESPONSE_BYTES } = require('./limits');
+const { withModelTimeout } = require('./request');
 
-async function runWithVsCode(vscode, input, model, token, { conversation, tools, tokenAwareInput = false } = {}) {
+async function runWithVsCode(vscode, input, model, token, options = {}) {
+  let phase = 'preparing request';
+  let finished = false;
+  const progress = value => {
+    if (finished) return;
+    phase = value;
+    options.onProgress?.(phase);
+  };
+  try {
+    return await withModelTimeout(vscode, token, options.timeoutSeconds,
+      requestToken => runRequest(vscode, input, model, requestToken, { ...options, progress }),
+      () => 'VS Code model request for ' + model.id + ' (' + phase + ')');
+  } finally { finished = true; }
+}
+
+async function runRequest(vscode, input, model, token, { conversation, tools, tokenAwareInput = false, progress }) {
   assertCallableModel(model);
   const prompt = String(input.prompt || '');
   const systemPrompt = String(input.systemPrompt || '');
@@ -13,13 +29,8 @@ async function runWithVsCode(vscode, input, model, token, { conversation, tools,
   if (tokenAwareInput && (!Number.isSafeInteger(model.maxInputTokens) || model.maxInputTokens <= 0)) {
     throw new Error('The selected model does not report a usable input-token limit. Select another shared model; evidence was not truncated.');
   }
-  const cancellation = new vscode.CancellationTokenSource();
-  const listener = token?.onCancellationRequested?.(() => cancellation.cancel());
-  if (token?.isCancellationRequested) cancellation.cancel();
-  let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; cancellation.cancel(); }, 180000);
   const started = Date.now();
-  const check = () => { if (cancellation.token.isCancellationRequested) throw new vscode.CancellationError(); };
+  const check = () => { if (token.isCancellationRequested) throw new vscode.CancellationError(); };
   try {
     check();
     const requestMessages = conversation ? conversation.map(message => message.role === 'system' ? { ...message, role: 'user' } : message)
@@ -34,31 +45,39 @@ async function runWithVsCode(vscode, input, model, token, { conversation, tools,
       ]);
       return vscode.LanguageModelChatMessage.User(message.content);
     });
+    progress('counting input tokens');
     let estimatedInputTokens = 0;
     for (const message of messages) {
-      const count = await model.countTokens(message, cancellation.token);
+      check();
+      const count = await model.countTokens(message, token);
       if (tokenAwareInput && (!Number.isSafeInteger(count) || count <= 0)) {
         throw new Error('The selected model returned an invalid input-token count. Select another shared model; evidence was not truncated.');
       }
       estimatedInputTokens += count;
     }
-    if (tools?.length) estimatedInputTokens += await model.countTokens(JSON.stringify(tools), cancellation.token);
+    check();
+    if (tools?.length) estimatedInputTokens += await model.countTokens(JSON.stringify(tools), token);
     check();
     if (tokenAwareInput ? estimatedInputTokens > model.maxInputTokens : estimatedInputTokens >= model.maxInputTokens) {
       throw new Error('The input needs ' + estimatedInputTokens.toLocaleString('en-US') + ' tokens, but model ' + model.id +
         ' reports an input limit of ' + model.maxInputTokens.toLocaleString('en-US') +
         '. Select a larger-context shared model. All evidence was preserved; nothing was truncated.');
     }
+    progress('waiting for provider response');
     const response = await model.sendRequest(messages, tools?.length ? {
       tools: tools.map(({ name, description, inputSchema }) =>
         ({ name, description, inputSchema }))
-    } : {}, cancellation.token);
+    } : {}, token);
+    check();
     let text = '';
     let bytes = 0;
     const toolCalls = [];
     const ignoredPartTypes = new Set();
+    let received = false;
+    progress('waiting for response stream');
     for await (const fragment of tools ? response.stream : response.text) {
       check();
+      if (!received) { received = true; progress('receiving response stream'); }
       if (tools && fragment instanceof vscode.LanguageModelToolCallPart) {
         toolCalls.push({ callId: fragment.callId, name: fragment.name, input: fragment.input });
         bytes += Buffer.byteLength(JSON.stringify(toolCalls.at(-1)), 'utf8');
@@ -81,10 +100,11 @@ async function runWithVsCode(vscode, input, model, token, { conversation, tools,
     }
     check();
     if (!text.trim() && !toolCalls.length) throw new Error('VS Code model returned no visible response.');
+    progress('counting output tokens');
     const estimatedOutputTokens = await model.countTokens(tools ? vscode.LanguageModelChatMessage.Assistant([
       ...(text ? [new vscode.LanguageModelTextPart(text)] : []),
       ...toolCalls.map(call => new vscode.LanguageModelToolCallPart(call.callId, call.name, call.input))
-    ]) : text, cancellation.token);
+    ]) : text, token);
     check();
     return {
       provider: 'vscode', model: model.id, reportedModel: model.id, modelVendor: model.vendor, modelVersion: model.version,
@@ -96,12 +116,11 @@ async function runWithVsCode(vscode, input, model, token, { conversation, tools,
       maxOutputTokens: null, temperature: null, finishReason: null, runId: null, elapsedMs: Date.now() - started
     };
   } catch (error) {
-    if (timedOut) throw new Error('VS Code model request timed out after 180 seconds.');
     if (/only available to VS Code core/i.test(error.message || '')) {
       throw new Error('The selected model is reserved for VS Code core. Use Select model to choose another chat model. ' + error.message);
     }
     throw error;
-  } finally { clearTimeout(timer); listener?.dispose(); cancellation.dispose(); }
+  }
 }
 
 module.exports = { runWithVsCode };

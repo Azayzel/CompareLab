@@ -7,13 +7,15 @@ const { evaluationKey } = require('../src/providers/vscode/review');
 const { reviewPacket } = require('../src/comparison/core');
 const { AGENT_PROMPT } = require('../src/tools/agent');
 
-function host(overrides = {}, providerOverrides = {}, historyOverrides = {}) {
+function host(overrides = {}, providerOverrides = {}, historyOverrides = {}, verificationOverrides = {}) {
   const messages = [];
   const files = [];
   const errors = [];
+  const diagnostics = [];
   let handler;
   let open;
   let markup;
+  let editorPanel;
   let evaluations = 0;
   let onDispose;
   const historyEntries = [];
@@ -43,8 +45,12 @@ function host(overrides = {}, providerOverrides = {}, historyOverrides = {}) {
   const vscode = {
     commands: { registerCommand: (name, callback) => { open = callback; return disposable; } },
     window: {
+      createOutputChannel: name => {
+        assert.equal(name, 'CompareLab');
+        return { appendLine: line => diagnostics.push(JSON.parse(line)), dispose() {} };
+      },
       registerTreeDataProvider: (id, provider) => { treeProviders.push({ id, provider }); return disposable; },
-      createWebviewPanel: () => ({ onDidDispose: callback => { onDispose = callback; return disposable; }, webview: {
+      createWebviewPanel: () => (editorPanel = { onDidDispose: callback => { onDispose = callback; return disposable; }, webview: {
         set html(value) { markup = value; },
         cspSource: 'self', asWebviewUri: uri => uri, postMessage: async message => messages.push(message),
         onDidReceiveMessage: callback => { handler = callback; }
@@ -60,6 +66,8 @@ function host(overrides = {}, providerOverrides = {}, historyOverrides = {}) {
   const copilot = {
     ...require('../src/providers/vscode/models'),
     ...require('../src/providers/vscode/generation'),
+    ...require('../src/providers/vscode/request'),
+    ...require('../src/providers/vscode/limits'),
     ...require('../src/providers/vscode/review'),
     evaluationKey, selectEvaluator: async () => ({ name: 'Reviewer' }), openReviewChat: async () => {},
     evaluateWithCopilot: async (api, input) => {
@@ -74,12 +82,13 @@ function host(overrides = {}, providerOverrides = {}, historyOverrides = {}) {
     module, Buffer, setTimeout, clearTimeout, AbortController,
     require: name => name === 'vscode' ? vscode : name.startsWith('./providers/vscode/') ? copilot
       : name === './providers/http' ? { ...require('../src/providers/http'), ...providerOverrides }
+      : name === './providers/verification' ? { ...require('../src/providers/verification'), ...verificationOverrides }
       : name === './records/history' ? { createHistory: () => history }
       : name.startsWith('./') ? require('../src/' + name.slice(2)) : require(name)
   });
   module.exports.activate({ subscriptions: [], extensionUri: '/extension', globalStorageUri: { fsPath: '/history' }, secrets: { get: async () => undefined } });
   open();
-  return { messages, files, errors, vscode, markup, historyEntries, treeProviders, dispose: () => onDispose(),
+  return { messages, files, errors, diagnostics, vscode, markup, editorPanel, historyEntries, treeProviders, dispose: () => onDispose(),
     send: message => handler(message), evaluations: () => evaluations };
 }
 
@@ -98,6 +107,11 @@ test('sidebar launcher uses the SVG and opens the existing comparison command', 
   assert.equal(manifest.contributes.viewsWelcome[0].view, instance.treeProviders[0].id);
   assert.match(manifest.contributes.viewsWelcome[0].contents, /\[Open CompareLab\]\(command:comparelab\.open\)/);
   assert.match(instance.markup, /<title>CompareLab<\/title>/);
+  assert.equal(instance.editorPanel.iconPath, '/extension/media/comparelab.svg');
+  assert.match(instance.markup, /img-src self;/);
+  assert.match(instance.markup, /class="brand-logo" src="\/extension\/media\/comparelab-icon\.png" alt="" width="44" height="44"/);
+  assert.match(instance.markup, /<h1>CompareLab<\/h1>/);
+  assert.doesNotMatch(instance.markup, /⇄ CompareLab/);
 });
 
 test('Marketplace icon is a packaged PNG at least 128 pixels square', () => {
@@ -143,7 +157,7 @@ function webview(initialState) {
       'modelVersion', 'contextWindowTokens', 'contextWindowSource', 'inputTokens', 'outputTokens', 'maxOutputTokens',
       'finishReason', 'temperature']) field(prefix + '-' + key);
   }
-  for (const id of ['prompt', 'incomingMessage', 'evidence', 'comparisonMode', 'checks', 'testRepetitions', 'checkOrder',
+  for (const id of ['prompt', 'incomingMessage', 'evidence', 'comparisonMode', 'checks', 'testRepetitions', 'checkOrder', 'parallelModels', 'modelTimeoutSeconds',
     'optimizerGoal', 'optimizerPreserve', 'optimizerSuccess', 'optimizerDraft']) field(id);
   const scripts = ['markdown.js', 'app.js'].map(file => fs.readFileSync(path.join(__dirname, '../media/' + file), 'utf8')).join('\n');
   vm.runInNewContext(scripts, {
@@ -458,13 +472,44 @@ test('response cards render readable reports with unchanged raw responses and ex
   assert.ok(instance.markup.indexOf('media/markdown.js') < instance.markup.indexOf('media/app.js'));
 });
 
+test('test history renders retained verification when its evaluator fails', () => {
+  const panel = webview(experiment());
+  const record = { id: 'partial-check', status: 'partial', plan: { repetitions: 1, baseline: { model: 'one' },
+    candidate: { model: 'two' }, comparisonMode: 'model-prompt-only', parallel: false },
+  pairs: [{ number: 1, order: ['baseline', 'candidate'],
+    baseline: { status: 'succeeded', result: { response: 'First answer.' } },
+    candidate: { status: 'succeeded', result: { response: 'Second answer.' } },
+    evaluationStatus: 'failed', evaluation: null, evaluationError: 'Evaluator unavailable.',
+    verification: { baseline: { status: 'passed', detail: 'One check passed.' },
+      candidate: { status: 'failed', detail: 'Expected 42.' } } }] };
+  panel.receive({ type: 'testUpdate', record, summary: { preference: 'inconclusive', metrics: {},
+    pairDecisions: [], warnings: [] }, message: 'Review failed.' });
+  const text = visibleText(panel.field('testResults'));
+  assert.match(text, /Executable check observations/);
+  assert.match(text, /One check passed/);
+  assert.match(text, /Expected 42/);
+});
+
+test('standalone investigation metadata survives webview restoration and export', () => {
+  const input = experiment();
+  input.baseline.investigationBudget = { limited: true };
+  input.candidate.toolEvidence = [{ tool: 'read_fact', content: 'Partial evidence', truncated: true }];
+  const panel = webview(input);
+  panel.click('export');
+  const exported = panel.messages.at(-1).experiment;
+  assert.equal(exported.baseline.investigationBudget.limited, true);
+  assert.equal(exported.candidate.toolEvidence[0].truncated, true);
+});
+
 test('ordinary recommendations highlight only the preferred model and clear stale highlights', () => {
   const input = experiment();
   const panel = webview(input);
   const result = require('../src/comparison/core').compare(input);
   for (const verdict of ['candidate', 'baseline', 'tie', null]) {
     result.evaluation = verdict ? { verdict, summary: 'Practical recommendation.', model: { name: 'Reviewer', version: 'v1' },
-      criteria: [], unknowns: [], judgments: [], inputTokenEstimates: [], note: 'Human verification required.' } : null;
+      orderConsistent: true, preferenceEstablished: verdict !== 'tie',
+      criteria: [{ criterion: 'grounding', verdict, citations: [] }], unknowns: [], judgments: [], inputTokenEstimates: [], note: 'Human verification required.' } : null;
+    result.decision = require('../src/comparison/decision').comparisonDecision(result);
     panel.receive({ type: 'result', revision: panel.messages.at(-1).revision, result });
     for (const side of ['baseline', 'candidate']) {
       assert.equal(panel.field(side + 'ResponseCard').className,
@@ -472,6 +517,15 @@ test('ordinary recommendations highlight only the preferred model and clear stal
       assert.equal(visibleText(panel.field(side + 'ResponseStatus')).includes('★ Preferred'), side === verdict);
     }
   }
+  result.evaluation = { verdict: 'candidate', orderConsistent: true, preferenceEstablished: true,
+    summary: 'Suggested candidate.', model: { name: 'Reviewer' },
+    criteria: [{ criterion: 'grounding', verdict: 'candidate', citations: [] }], unknowns: [], judgments: [], inputTokenEstimates: [] };
+  result.checks = [{ phrase: 'required value', baseline: true, candidate: false }];
+  result.decision = require('../src/comparison/decision').comparisonDecision(result);
+  panel.receive({ type: 'result', revision: panel.messages.at(-1).revision, result });
+  assert.equal(panel.field('candidateResponseCard').className, 'response-card');
+  assert.match(visibleText(panel.field('evaluation')), /failed required checks/);
+  assert.doesNotMatch(visibleText(panel.field('evaluation')), /Recommend Candidate/);
 });
 
 test('VS Code estimates survive a model run, webview restoration, export, and history', async () => {
@@ -795,6 +849,91 @@ test('shared evidence, original, edited and review stages reflect actual run tra
   assert.equal(model.timerCount(), 0);
 });
 
+test('execution controls restore, persist, and keep historical defaults compatible', () => {
+  const panel = webview(experiment());
+  assert.equal(panel.field('parallelModels').checked, false);
+  assert.equal(panel.field('modelTimeoutSeconds').value, 600);
+  panel.field('parallelModels').checked = true;
+  panel.field('modelTimeoutSeconds').value = '900';
+  panel.field('parallelModels').listeners.get('input')();
+  assert.match(panel.field('comparisonRunSummary').textContent, /simultaneously/);
+  panel.click('orchestrate');
+  const settings = panel.messages.at(-1).experiment.test;
+  assert.equal(settings.parallel, true);
+  assert.equal(settings.modelTimeoutSeconds, 900);
+  const restored = webview(panel.state());
+  assert.equal(restored.field('parallelModels').checked, true);
+  assert.equal(restored.field('modelTimeoutSeconds').value, 900);
+  const markup = host().markup;
+  assert.match(markup, /id="parallelModels" type="checkbox"/);
+  assert.match(markup, /id="modelTimeoutSeconds"[^>]+min="30"[^>]+max="3600"/);
+});
+
+test('concurrent VS Code comparisons forward the timeout and preserve settings in history and export', async () => {
+  let release, bothStarted;
+  const gate = new Promise(resolve => { release = resolve; });
+  const ready = new Promise(resolve => { bothStarted = resolve; });
+  const requests = [];
+  const instance = host({
+    resolveRunModels: async () => ({ baseline: { id: 'one' }, candidate: { id: 'two' } }),
+    runWithVsCode: async (api, request, model, token, options) => {
+      requests.push({ request, options });
+      if (requests.length === 2) bothStarted();
+      await gate;
+      return { ...request, response: model.id + ' answer' };
+    }
+  });
+  const input = { prompt: 'Implement a scheduler', evidence: 'Contract', comparisonMode: 'model-prompt-only',
+    baseline: { provider: 'vscode', model: 'one' }, candidate: { provider: 'vscode', model: 'two' },
+    test: { repetitions: 1, parallel: true, modelTimeoutSeconds: 900 } };
+  const pending = instance.send({ type: 'orchestrate', experiment: input });
+  await ready;
+  assert.equal(instance.evaluations(), 0);
+  assert.ok(requests.every(request => request.options.timeoutSeconds === 900));
+  release();
+  await pending;
+  assert.deepEqual(instance.errors, []);
+  const completed = instance.messages.findLast(message => message.type === 'testFinished').experiment;
+  assert.equal(completed.test.parallel, true);
+  assert.equal(completed.test.modelTimeoutSeconds, 900);
+  assert.equal(instance.historyEntries[0].experiment.test.parallel, true);
+  const panel = webview(completed);
+  panel.click('export');
+  await instance.send(panel.messages.at(-1));
+  const exported = JSON.parse(instance.files[0]);
+  assert.equal(exported.test.modelTimeoutSeconds, 900);
+  assert.ok(require('../src/comparison/core').compare(exported).testRun);
+});
+
+test('Generate both overlaps when selected, retains a peer on failure, and releases busy state', async () => {
+  let release, bothStarted;
+  const gate = new Promise(resolve => { release = resolve; });
+  const ready = new Promise(resolve => { bothStarted = resolve; });
+  let calls = 0;
+  const instance = host({
+    resolveRunModels: async () => ({ a: { id: 'one' }, b: { id: 'two' } }),
+    runWithVsCode: async (api, request, model, token, options) => {
+      assert.equal(options.timeoutSeconds, 1200);
+      if (++calls === 2) bothStarted();
+      await gate;
+      if (model.id === 'two') throw new Error('Provider quota exceeded');
+      return { ...request, response: 'successful peer' };
+    }
+  });
+  const input = { prompt: 'Implement', baseline: { provider: 'vscode', model: 'one' },
+    candidate: { provider: 'vscode', model: 'two' }, test: { parallel: true, modelTimeoutSeconds: 1200 } };
+  const pending = instance.send({ type: 'runBoth', experiment: input });
+  await ready;
+  assert.equal(instance.messages.at(-1).type, 'runStatus');
+  release();
+  await pending;
+  assert.equal(calls, 2);
+  assert.equal(instance.messages.find(message => message.type === 'runResult').side, 'a');
+  assert.match(instance.messages.find(message => message.type === 'runStatus' && /Error/.test(message.message)).message, /quota/);
+  assert.equal(instance.messages.at(-1).type, 'busy');
+  assert.equal(instance.messages.at(-1).value, false);
+});
+
 test('rewriting uses a selected model without tools, and errors/cancellation leave prompt drafts unchanged', async () => {
   const requests = [];
   const instance = host({ selectRunModel: async () => ({ id: 'writer' }),
@@ -806,7 +945,8 @@ test('rewriting uses a selected model without tools, and errors/cancellation lea
   await instance.send({ type: 'generatePrompt', experiment: source, revision: 42, guidance: { goal: 'Ground findings' } });
   assert.deepEqual(instance.errors, []);
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].options, undefined);
+  assert.equal(requests[0].options.tools, undefined);
+  assert.equal(requests[0].options.timeoutSeconds, undefined);
   assert.equal(instance.evaluations(), 0);
   assert.equal(instance.historyEntries.length, 0);
   const draft = instance.messages.find(message => message.type === 'optimizerDraft');
@@ -984,6 +1124,7 @@ test('HTML export saves one offline report with bundled styling without calling 
   assert.equal(instance.files.length, 1);
   assert.match(instance.files[0], /<!doctype html>/);
   assert.match(instance.files[0], /Offline assessment report/);
+  assert.match(instance.files[0], /class="brand-logo" src="data:image\/png;base64,/);
   assert.match(instance.files[0], /First answer\./);
   assert.match(instance.files[0], /Second answer\./);
   assert.match(instance.files[0], /Content-Security-Policy/);
@@ -1141,7 +1282,8 @@ test('comparison is offline; evaluation is explicit and reused for report export
   assert.equal(instance.messages.findLast(message => message.type === 'result').result.evaluation.verdict, 'tie');
   await instance.send({ type: 'report', experiment: input });
   assert.equal(instance.evaluations(), 1);
-  assert.match(instance.files[0], /\*\*Tie\*\*/);
+  assert.match(instance.files[0], /No supported recommendation/);
+  assert.match(instance.files[0], /Evaluator judgment \(not the acceptance decision\): Tie/);
   assert.equal(instance.messages.at(-1).value, false);
 });
 
@@ -1360,6 +1502,209 @@ test('orchestration cancellation aborts an active provider and saves its partial
   assert.equal(instance.evaluations(), 0);
   assert.equal(instance.messages.findLast(message => message.type === 'testFinished').experiment.testRun.status, 'cancelled');
   assert.equal(instance.messages.at(-1).value, false);
+});
+
+test('executable checker approval, observations and configuration survive orchestration and webview export', async () => {
+  const { digest } = require('../src/comparison/verification');
+  let prepared = 0, verified = 0, reviewed;
+  const instance = host({
+    resolveRunModels: async () => ({ baseline: { id: 'one' }, candidate: { id: 'two' } }),
+    runWithVsCode: async (api, request, model) => ({ ...request, model: model.id, response: '```js\nmodule.exports=42;\n```' }),
+    evaluateWithCopilot: async (api, input) => {
+      reviewed = input;
+      return { inputFingerprint: evaluationKey(input), verdict: 'candidate', preferenceEstablished: true,
+        orderConsistent: true, summary: 'Both passed; candidate explains the contract.', unknowns: [], judgments: [],
+        inputTokenEstimates: [], requestCount: 1, citationRepairs: 0, usageTurns: [], model: { id: 'judge', name: 'Judge' },
+        criteria: [{ criterion: 'grounding', verdict: 'tie', citations: [] },
+          { criterion: 'reasoning', verdict: 'candidate', citations: [] }] };
+    }
+  }, {}, {}, {
+    prepareVerification: async () => { prepared++; return 'sha256:' + 'a'.repeat(64); },
+    verifyPair: async (input, image) => {
+      verified++;
+      const observation = side => ({ responseHash: digest(input[side].response), status: 'passed', detail: 'Passed',
+        tests: 1, passed: 1, failed: 0, exitCode: 0 });
+      return { image, checkerHash: digest(input.verification.source), baseline: observation('baseline'), candidate: observation('candidate') };
+    }
+  });
+  instance.vscode.window.showWarningMessage = async (message, options) => {
+    assert.match(message, /isolated Docker/);
+    assert.match(options.detail, /No network/);
+    return 'Run isolated checks';
+  };
+  const input = { prompt: 'Implement the contract.', evidence: 'Return 42.', comparisonMode: 'model-prompt-only',
+    baseline: { provider: 'vscode', model: 'one' }, candidate: { provider: 'vscode', model: 'two' },
+    review: { decisionPolicy: 'best-supported', resolveEvidence: true },
+    test: { repetitions: 1 }, verification: { kind: 'node-commonjs', name: 'checker.cjs', source: '// trusted checker', timeoutSeconds: 30 } };
+  await instance.send({ type: 'orchestrate', experiment: input });
+  assert.deepEqual(instance.errors, []);
+  assert.equal(prepared, 1);
+  assert.equal(verified, 1);
+  assert.equal(reviewed.verificationResults.baseline.status, 'passed');
+  const completed = instance.historyEntries[0].experiment;
+  assert.equal(completed.testRun.status, 'completed');
+  assert.equal(completed.verification.source, input.verification.source);
+  assert.equal(completed.testRun.pairs[0].evaluation.verification.candidate.status, 'passed');
+  const panel = webview(completed);
+  panel.click('export');
+  assert.equal(panel.messages.at(-1).experiment.verification.source, input.verification.source);
+  assert.equal(panel.messages.at(-1).experiment.review.resolveEvidence, true);
+  panel.click('clearChecker');
+  assert.equal(panel.state().verification, undefined);
+});
+
+for (const workflow of ['evaluate', 'orchestrate']) {
+  for (const failure of ['error', 'timeout', 'cancelled']) {
+    test(workflow + ' retains completed checks after evaluator ' + failure, async t => {
+      if (failure === 'timeout') t.mock.timers.enable({ apis: ['setTimeout'] });
+      const { digest } = require('../src/comparison/verification');
+      const { compare, asMarkdown } = require('../src/comparison/core');
+      const { asHtml } = require('../src/reporting/html');
+      let started, observations, verified = 0;
+      const ready = new Promise(resolve => { started = resolve; });
+      const input = { ...experiment(), test: { repetitions: 1, modelTimeoutSeconds: 30 },
+        baseline: { provider: 'ollama', model: 'one', response: 'First answer.' },
+        candidate: { provider: 'ollama', model: 'two', response: 'Second answer.' },
+        verification: { kind: 'node-commonjs', name: 'checker.cjs', source: 'trusted checker', timeoutSeconds: 30 } };
+      const instance = host({
+        evaluateWithCopilot: async () => {
+          started();
+          if (failure === 'error') throw new Error('Evaluator quota exceeded');
+          return new Promise(() => {});
+        }
+      }, { runModel: async request => ({ ...request,
+        response: request.model === 'one' ? input.baseline.response : input.candidate.response }) }, {}, {
+        prepareVerification: async () => 'sha256:' + 'a'.repeat(64),
+        verifyPair: async (packet, image) => {
+          verified++;
+          const observation = side => ({ responseHash: digest(packet[side].response), status: 'passed',
+            detail: 'Completed isolated check', tests: 1, passed: 1, failed: 0, exitCode: 0 });
+          observations = { image, checkerHash: digest(packet.verification.source),
+            baseline: observation('baseline'), candidate: observation('candidate') };
+          return observations;
+        }
+      });
+      instance.vscode.window.showWarningMessage = async () => 'Run isolated checks';
+      let panel = webview(input);
+      const pending = instance.send({ type: workflow, experiment: input, revision: panel.messages.at(-1).revision });
+      await ready;
+      if (failure === 'timeout') t.mock.timers.tick(30000);
+      if (failure === 'cancelled') await instance.send({ type: 'cancelReview' });
+      await pending;
+      let retained;
+      if (workflow === 'orchestrate') {
+        retained = instance.messages.findLast(message => message.type === 'testFinished').experiment;
+        const pair = retained.testRun.pairs[0];
+        assert.equal(pair.evaluationStatus, failure === 'cancelled' ? 'cancelled' : 'failed');
+        assert.equal(pair.evaluation, null);
+        assert.deepEqual(pair.verification, observations);
+        panel = webview(retained);
+        await instance.send(panel.messages.at(-1));
+      }
+      const message = instance.messages.findLast(message => message.type === 'result');
+      assert.ok(message, 'Completed checks should be displayed even without an assessment');
+      assert.equal(message.result.evaluation, null);
+      if (workflow === 'evaluate') assert.deepEqual(message.result.verificationResults, observations);
+      panel.receive(message);
+      assert.match(visibleText(panel.field(workflow === 'evaluate' ? 'evaluation' : 'testResults')), /Completed isolated check/);
+      panel.click('historySave');
+      await instance.send(panel.messages.at(-1));
+      const saved = instance.historyEntries.at(-1);
+      assert.equal(saved.evaluation, null);
+      retained = saved.experiment;
+      assert.deepEqual(workflow === 'evaluate' ? retained.verificationResults : retained.testRun.pairs[0].verification, observations);
+      panel = webview(retained);
+      panel.click('export');
+      await instance.send(panel.messages.at(-1));
+      const exported = JSON.parse(instance.files.at(-1));
+      assert.deepEqual(workflow === 'evaluate' ? exported.verificationResults : exported.testRun.pairs[0].verification, observations);
+      const report = compare(exported);
+      assert.match(asMarkdown(report), /Completed isolated check/);
+      assert.match(asHtml(report, { css: '', markdownScript: '' }), /Completed isolated check/);
+      assert.equal(verified, 1, 'History, restoration and exports must not rerun checks');
+      assert.equal(instance.messages.findLast(message => message.type === 'busy').value, false);
+    });
+  }
+}
+
+test('review evidence retains rejected requests in the audit but not in adjudication evidence', async () => {
+  let reviews = 0, turns = 0, invocations = 0;
+  const base = { verdict: 'candidate', preferenceEstablished: true, orderConsistent: false, summary: 'Disputed result',
+    unknowns: [], judgments: [], inputTokenEstimates: [], requestCount: 2, citationRepairs: 0, usageTurns: [],
+    criteria: [{ criterion: 'grounding', verdict: 'insufficient_evidence', citations: [] },
+      { criterion: 'reasoning', verdict: 'candidate', citations: [] }], model: { id: 'judge', name: 'Judge' } };
+  const instance = host({
+    selectEvaluator: async () => ({ id: 'judge', name: 'Judge' }),
+    evaluateWithCopilot: async (api, input) => {
+      reviews++;
+      if (reviews === 2) {
+        assert.match(input.resolutionEvidence, /Observed 42/);
+        assert.doesNotMatch(input.resolutionEvidence, /Invalid arguments|invalidQuery/);
+        assert.equal(input.review.checkOrder, false);
+      }
+      return { ...base, inputFingerprint: evaluationKey(input) };
+    },
+    runWithVsCode: async () => ++turns <= 2 ? { model: 'judge',
+      toolCalls: [{ callId: 'read-' + turns, name: 'read_fact', input: turns === 1 ? { invalidQuery: true } : {} }] }
+      : { model: 'judge', response: 'Collected the observation.' }
+  });
+  class Text { constructor(value) { this.value = value; } }
+  instance.vscode.LanguageModelTextPart = Text;
+  instance.vscode.lm = { tools: [{ name: 'read_fact', description: 'Read an observation', inputSchema: { type: 'object' } }],
+    invokeTool: async () => {
+      if (++invocations === 1) throw new Error('MCP -32602: Invalid arguments: use a valid query');
+      return { content: [new Text('Observed 42')] };
+    } };
+  instance.vscode.window.showWarningMessage = async () => 'Allow request';
+  const input = { ...experiment(), toolSelection: ['read_fact'], review: { decisionPolicy: 'best-supported', resolveEvidence: true } };
+  await instance.send({ type: 'evaluate', experiment: input });
+  assert.deepEqual(instance.errors, []);
+  assert.equal(invocations, 2);
+  assert.equal(reviews, 2);
+  assert.equal(turns, 3);
+  const result = instance.messages.findLast(message => message.type === 'result').result;
+  assert.equal(result.evaluation.resolution.status, 'completed');
+  assert.match(result.evaluation.resolution.evidence, /Observed 42/);
+  const collection = result.evaluation.resolution.collection;
+  assert.equal(collection.toolEvidence.length, 2);
+  assert.equal(collection.toolEvidence[0].isError, true);
+  assert.equal(collection.toolEvidence[0].input.invalidQuery, true);
+  assert.match(collection.toolEvidence[0].content, /Invalid arguments/);
+  assert.equal(collection.toolEvidence[1].content, 'Observed 42');
+  assert.equal(collection.modelRequestCount, 3);
+  assert.equal(collection.toolCallCount, 2);
+});
+
+test('generation diagnostics identify runtime and requests without retaining request content or raw errors', async () => {
+  let outcome = 'succeeded';
+  const instance = host({
+    resolveRunModels: async () => ({ a: { id: 'diagnostic-model' } }),
+    runWithVsCode: async (api, input, model, token, options) => {
+      options.onProgress('waiting for provider response');
+      if (outcome === 'cancelled') throw new api.CancellationError('private cancellation detail');
+      if (outcome !== 'succeeded') throw Object.assign(new Error('private provider error'), {
+        code: outcome === 'timed-out' ? 'COMPARELAB_MODEL_TIMEOUT' : 'provider-error'
+      });
+      return { ...input, response: 'private answer', model: model.id };
+    }
+  });
+  assert.equal(instance.diagnostics[0].event, 'runtime');
+  assert.equal(instance.diagnostics[0].extensionPath, '/extension');
+  assert.equal(instance.diagnostics[0].version, 'unknown');
+  const input = { ...experiment(), prompt: 'private prompt', evidence: 'private evidence',
+    baseline: { provider: 'vscode', model: 'diagnostic-model', systemPrompt: 'private instructions' },
+    test: { modelTimeoutSeconds: 180 } };
+  for (const status of ['succeeded', 'failed', 'timed-out', 'cancelled']) {
+    outcome = status;
+    await instance.send({ type: 'run', side: 'a', experiment: input });
+    const request = instance.diagnostics.at(-1).request;
+    const events = instance.diagnostics.filter(event => event.request === request);
+    assert.deepEqual(events.map(event => event.status), ['started', 'progress', status]);
+    assert.ok(events.every(event => event.model === 'diagnostic-model' && event.timeoutSeconds === 180 && event.elapsedMs >= 0));
+    assert.equal(events.at(-1).phase, 'waiting for provider response');
+  }
+  assert.equal(new Set(instance.diagnostics.slice(1).map(event => event.request)).size, 4);
+  assert.doesNotMatch(JSON.stringify(instance.diagnostics), /private|provider-error/);
 });
 
 test('ordinary CodeMind-shaped runs separate the agent instructions and normalized event', async () => {

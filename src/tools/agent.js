@@ -84,7 +84,12 @@ async function verifyReadOnlyTools(vscode, tools) {
   return verified;
 }
 
-async function runToolAgent(vscode, input, tools, runTurn, token, progress = () => {}) {
+async function runToolAgent(vscode, input, tools, runTurn, token, progress = () => {}, limits) {
+  if (limits && (!Number.isSafeInteger(limits.modelRequests) || limits.modelRequests < 1 ||
+      !Number.isSafeInteger(limits.toolCalls) || limits.toolCalls < 1 ||
+      limits.evidenceBytes !== undefined && (!Number.isSafeInteger(limits.evidenceBytes) || limits.evidenceBytes < 1))) {
+    throw new Error('Invalid evidence-resolution limits.');
+  }
   const verified = readOnlyCatalogs.get(tools);
   if (!verified || !isDeepStrictEqual(verified, toolCatalog(tools))) {
     throw new Error('Tools must be freshly verified read-only for this test. Saved selections and per-call approval cannot bypass this requirement.');
@@ -104,9 +109,23 @@ async function runToolAgent(vscode, input, tools, runTurn, token, progress = () 
   };
   const catalog = validateToolCatalog(toolCatalog(tools));
   const allowed = new Map(catalog.map(tool => [tool.name, tool]));
+  const policy = limits ? AGENT_PROMPT.replace('CompareLab imposes no tool-call, model-turn, investigation-time, or tool-result truncation budget.',
+    'This evidence-resolution round allows at most ' + limits.modelRequests + ' model requests and ' + limits.toolCalls +
+      ' tool calls. Collect the most relevant observations and finish within that budget; missing evidence must remain explicit.') : AGENT_PROMPT;
   const conversation = [...(input.systemPrompt ? [{ role: 'system', content: input.systemPrompt }] : []),
-    { role: 'user', content: input.prompt }, { role: 'user', content: AGENT_PROMPT }];
+    { role: 'user', content: input.prompt }, { role: 'user', content: policy }];
   const toolEvidence = [];
+  const exceedsEvidenceLimit = entry => limits?.evidenceBytes &&
+    Buffer.byteLength(JSON.stringify([...toolEvidence, entry])) > limits.evidenceBytes;
+  const retainFailure = entry => {
+    if (!exceedsEvidenceLimit(entry)) {
+      toolEvidence.push(entry);
+      return;
+    }
+    const marker = { tool: String(entry.tool || '').slice(0, 200), collectedAt: entry.collectedAt, isError: true,
+      content: 'Tool failure exceeded the evidence-resolution byte limit; details were not retained.' };
+    if (!exceedsEvidenceLimit(marker)) toolEvidence.push(marker);
+  };
   const usageTurns = [];
   const started = Date.now();
   const totals = { inputTokens: 0, outputTokens: 0, estimatedInputTokens: 0, estimatedOutputTokens: 0 };
@@ -114,6 +133,7 @@ async function runToolAgent(vscode, input, tools, runTurn, token, progress = () 
   try {
     while (true) {
       check();
+      if (limits && modelRequests >= limits.modelRequests) throw new Error('Evidence resolution exhausted its model-request budget.');
       progress('Tool-enabled run: model request ' + (++modelRequests) + ' | Tool calls: ' + toolEvidence.length);
       const result = await runCancellable(() => runTurn(conversation, catalog, cancellation.token));
       check();
@@ -141,6 +161,7 @@ async function runToolAgent(vscode, input, tools, runTurn, token, progress = () 
       conversation.push({ role: 'assistant', content: result.response || '', toolCalls: calls });
       for (const call of calls) {
         check();
+        if (limits && toolEvidence.length >= limits.toolCalls) throw new Error('Evidence resolution exhausted its tool-call budget.');
         const approval = await runCancellable(() => vscode.window.showWarningMessage('CompareLab: review this tool request?', {
           modal: true, detail: (input.runLabel || 'Tool-enabled run') + ' | Model: ' + (input.model || '(selected model)') +
             '\n\n' + call.name + '\n' + JSON.stringify(call.input, null, 2) +
@@ -172,9 +193,9 @@ async function runToolAgent(vscode, input, tools, runTurn, token, progress = () 
         } catch (error) {
           const repeated = previousRejections.some(entry => entry.tool === call.name && isDeepStrictEqual(entry.input, call.input));
           if (cancellation.token.isCancellationRequested || error instanceof vscode.CancellationError || !isInvalidArguments(error) || repeated) {
-            toolEvidence.push({ tool: call.name, input: call.input, collectedAt: new Date().toISOString(),
-              content: String(error.message || error || 'Tool invocation interrupted.') + '\nThe invocation failed or was interrupted; side effects may have occurred.',
-              isError: true });
+            retainFailure({ tool: call.name, input: call.input, collectedAt: new Date().toISOString(),
+              content: String(error.message || error || 'Tool invocation interrupted.') +
+                '\nThe invocation failed or was interrupted; side effects may have occurred.', isError: true });
             check();
             if (!repeated || !isInvalidArguments(error)) throw error;
             throw new Error('Tool ' + call.name + ' rejected the same arguments again after correction feedback: ' + error.message);
@@ -185,6 +206,11 @@ async function runToolAgent(vscode, input, tools, runTurn, token, progress = () 
         }
         const entry = { tool: call.name, input: call.input, collectedAt: new Date().toISOString(), content,
           ...(isError ? { isError: true, inputSchema: allowed.get(call.name).inputSchema } : {}) };
+        if (exceedsEvidenceLimit(entry)) {
+          retainFailure({ tool: call.name, collectedAt: entry.collectedAt, isError: true,
+            content: 'Tool result exceeded the evidence-resolution byte limit and was not retained or sent to the model.' });
+          throw new Error('Evidence resolution exceeded its retained-evidence limit. No oversized result was used as evidence.');
+        }
         toolEvidence.push(entry);
         conversation.push({ role: 'tool', toolCallId: call.callId, content: JSON.stringify(entry) });
       }

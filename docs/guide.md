@@ -116,6 +116,22 @@ Known VS Code-only dictation-cleanup models are excluded from both generation an
 
 **Debug Console reports `TypeError: Missing dataLength in event`?** This matches a Node network-inspector bug that can abort HTTP responses when debugging ([nodejs/node#66551](https://github.com/nodejs/node/issues/66551)). The workspace disables the experimental JavaScript Network view in `.vscode/settings.json`; stop and restart the **Run CompareLab Extension** debug session after pulling this change. If launching from another workspace, set `debug.javascript.enableNetworkView` to `false` there too. This disables debugger network inspection, not tool access or HTTP requests.
 
+**A model reports no internet connection, or seems to run past its timeout?** Check **Output → GitHub Copilot Chat** for the underlying error and compare its timestamp with system sleep/wake events. `net::ERR_NETWORK_IO_SUSPENDED` can accompany system sleep; it does not by itself prove that your connection or the model is unavailable. A later model can fail while an earlier one finishes before idle sleep begins. Parallel execution does not prevent this.
+
+**Output → CompareLab** identifies the loaded extension path/version and records generation request IDs, model IDs, stages, elapsed time, and configured deadlines. Stages distinguish input token counting, waiting for the provider, streaming, and output token counting. Timeouts identify the stalled stage; cancellation and provider failures are recorded separately. These local diagnostics do not log prompts, responses, tool arguments, API keys, or raw provider errors. Check the runtime path when comparing an installed release with a development checkout; a window title alone does not establish which extension registered the command.
+
+JavaScript deadlines cannot execute while the extension host is suspended, so a ten-minute timeout can be reported later in wall-clock time after waking. The timeout is per generation request or review stage, not for the entire multi-pair comparison.
+
+On macOS, inspect sleep/wake events with `pmset -g log`. To test without idle system sleep, run this in a terminal:
+
+```sh
+caffeinate -i -t 1800
+```
+
+This prevents idle system sleep for 30 minutes without changing permanent power settings; it may use more battery. It does not prevent manual sleep or closing the lid. Cancel the interrupted run and start a fresh test while awake; a suspended provider connection may not recover. Save the original comparison rather than silently replacing failed benchmark attempts with retries.
+
+Do not treat switching Copilot's Electron/Node transport as a fix for system sleep: it may change the error into a stalled request. If an awake test still fails, preserve the provider error, timing, execution settings, and model identity for diagnosis before changing more settings.
+
 1. Load or paste the agent instructions and supply the incoming trigger. Keep differing per-side prompt overrides empty for a controlled model test.
 2. Choose **End-to-end agent** to let each model independently use selected VS Code tools. **Source evidence / tool results** is optional in this mode. Configure/start MCP servers or enable tool-provider extensions in the same VS Code window/profile first. CompareLab uses `vscode.lm.tools`, not tools, selections, or results inherited from Chat. Tool calling requires VS Code 1.95+ and a tool-capable model; MCP availability also depends on your VS Code version and server setup. Alternatively, choose **Model / prompt only** and supply the same frozen evidence both models will receive.
 3. Use **Select model** on each side. Optionally choose Ollama or an OpenAI-compatible endpoint instead; match sampling settings and output budgets for those providers where possible.
@@ -148,7 +164,7 @@ Each newly completed model request retains its input/output token counts, includ
 - **Not billed cost:** Copilot subscriptions, hidden/unreported reasoning, caching discounts and cache-write charges, tools, taxes, negotiated discounts, PTUs, Batch, Flex, Priority and other deployment types are not modeled. All input is priced as uncached. Failed/cancelled requests can consume usage that is not retained. Unknown model IDs, deployment aliases, or missing token counts remain unpriced; there is no fuzzy name matching or silent zero-cost fallback.
 - **Historical estimates:** Reports recompute estimates using the bundled dated snapshot, not historical invoices. Update that snapshot only after verifying the exact meters, units (1K versus 1M), deployment type and effective dates. Check current prices before making purchasing decisions.
 
-Other existing safety limits still apply: the shared generation task/evidence request is limited to 150,000 characters, model/evaluator responses to 2 MiB, individual model requests and each paired review to 180 seconds, and the test record to 8 MiB. Direct evaluator reviews retain all supplied evidence and use the selected evaluator's reported input-token limit, not a fixed character cap. Exceeding a limit fails explicitly rather than silently trimming evidence or manufacturing a final answer. Provider rate limits still apply.
+Other safety limits still apply: the shared generation task/evidence request is limited to 150,000 characters, model/evaluator responses to 2 MiB, and the test record to 8 MiB. **Advanced settings -> VS Code timeout (seconds)** defaults to **600** and accepts whole seconds from **30 to 3600**. It applies to each VS Code generation request (including each tool round and prompt-draft generation) and each complete review stage, including reversed-order checks and citation repair. It is a total deadline, not an idle-stream timer. HTTP providers retain their own request behavior. Cancellation remains available; CompareLab releases the UI even if a VS Code provider ignores cancellation, but cannot guarantee the remote service stops processing or billing. Direct evaluator reviews retain all supplied evidence and use the selected evaluator's reported input-token limit, not a fixed character cap. Exceeding a limit fails explicitly rather than silently trimming evidence or manufacturing a final answer. Provider rate limits still apply.
 
 ### Selecting VS Code tools
 
@@ -168,11 +184,11 @@ VS Code models declaring that they cannot call tools are rejected before paired 
 
 Live requests may differ in scope, observation time, or side effects. End-to-end results compare **agents**, not isolated model/prompt quality. A task-specific preference can still be shown when majority and evidence checks pass; it is not proof of causality. The Copilot evaluator reviews recorded results without making live calls. Historical Datadog exports remain supported through compatibility-only instruction reconstruction; they do not enable any tools.
 
-Runs are sequential, alternating baseline-first and candidate-first to reduce resource contention and ordering effects. In frozen-evidence mode, three pairs make six generation requests and six review requests by default, plus at most three citation corrections. End-to-end mode makes as many generation requests and tool calls as needed, with the same review budget. There is no automatic generation retry. Cancellation stops remaining calls and retains a partial record; failed or incomplete pairs never reuse pasted responses. Test records are bounded to 8 MiB; hitting the limit stops further work and labels the unretained result.
+Runs are sequential by default, alternating baseline-first and candidate-first to reduce resource contention and ordering effects. Enable **Advanced settings -> Run models simultaneously** to start both sides of each pair together. Reviews wait for both sides to succeed; pairs and review orders remain sequential. Simultaneous runs can compete for provider quotas or local compute, so their timings are not isolated speed measurements. The choice and any non-default timeout are preserved in saved comparisons. In frozen-evidence mode, three pairs make six generation requests and six review requests by default, plus at most three citation corrections. End-to-end mode makes as many generation requests and tool calls as needed, with the same review budget. There is no automatic generation retry. Cancellation stops remaining calls and retains a partial record; a failed side does not discard its successful peer, and failed or incomplete pairs never reuse pasted responses. Test records are bounded to 8 MiB; hitting the limit stops further work and labels the unretained result.
 
 VS Code generation records the selected model/vendor/version, request messages, wall-clock duration, and model-counted input/output token estimates. Input estimates count each request's messages and tool definitions; output estimates count visible text and tool-call output, not hidden reasoning. Repeated conversation context is counted again on each turn. These are **not billed usage**: actual usage remains null, and estimates are retained separately in history and exports. Providers such as Ollama/OpenAI-compatible endpoints retain actual returned usage when available. Output caps, temperature and effective context size are not exposed as controlled settings for VS Code models. The Language Model API receives the instructions as user context (not a privileged system role) and does not inherit Agent-mode tools or chat history. End-to-end orchestration explicitly supplies the selected VS Code tools and executes requested calls. Exact request roles are retained in the test record.
 
-Supported preferences require consistent evaluator order checks, grounded substantive criteria, and no contradictory safety/grounding judgment or severe run warning. Default baseline retention is not counted as a win. A strict majority can produce a **task-specific preference** only when every pair completed and recorded configuration warnings do not confound the result. Other outcomes remain inconclusive. Median latency uses pairs where both generations succeeded; missing usage remains unknown, with known subtotals retained. These are repeated samples of **one task**, not statistical significance, a representative benchmark, verified correctness, or a model leaderboard.
+New drafts offer **Best-supported pick with confidence**: a cited substantive advantage can produce a provisional recommendation despite incomplete grounding or an order disagreement. Required checks, failed executable checks, contradictory grounding/actionability findings, severe comparability warnings, and unchanged effective prompts still block adoption. Genuine ties and unsupported votes do not become wins. **Strict** policy retains the previous requirement for consistent, grounded support; older saved drafts retain their policy. A strict majority can produce a **task-specific preference** only when every pair completed and recorded configuration warnings do not confound the result. Median latency uses pairs where both generations succeeded; missing usage remains unknown. These are repeated samples of **one task**, not statistical significance or a model leaderboard. Confidence labels are qualitative, not calibrated probabilities.
 
 Test JSON includes the instructions, trigger, exact requests, frozen evidence, settings, timestamps, responses, measurements, and assessments. Importing a matching test record or exporting a report makes no model calls. Editing its inputs or responses invalidates the attached record. Imported records are user-controlled artifacts, not authenticated execution attestations.
 
@@ -208,13 +224,13 @@ History begins with new saves after this feature is installed. Save the comparis
 
 Provide the original task, both responses, and a frozen evidence snapshot: logs, metrics, tool results, reference material, or expected outcomes. Open **Other actions → Review existing responses**, then select an available model. Use a current VS Code release with Copilot access; availability depends on sign-in, organization policy, consent, and quota. No separate provider API key is needed for this workflow.
 
-- The overall result is **Recommend Baseline** or **Recommend Candidate**: a practical recommendation, not proof of superiority. The summary requests confidence, decisive differences, tradeoffs, and evidence that could change the choice. Limited evidence produces a provisional, low-confidence recommendation; ties retain the baseline. Individual criteria can still be **Tie** or **Insufficient evidence**.
+- **Recommend Baseline/Candidate** identifies the best-supported eligible pick. **Provisional pick** and **low confidence** distinguish uncertain rankings from the stricter **Preferred** outcome. Strict policy abstains on inconsistent or insufficient grounding. Acceptance failures still block recommendations under either policy. The original evaluator judgments remain visible; baseline retention is not counted as a win. Grounding disagreements are labeled as disagreements rather than falsely claiming evidence was absent.
 - The evaluator receives anonymized A/B response labels, their tasks, and supplied evidence, without provider metadata or tools. Identities mentioned inside response text are not automatically redacted.
 - **Check reversed order** is enabled by default and runs **two sequential reviews** with the same selected model. Disagreement produces a provisional recommendation to retain the baseline, not a claim that it is better; both judgments and disputed criteria remain visible. Turning it off runs one review and explicitly records that order was not checked. Invalid citations can trigger **one extra correction request total**, so evaluation uses up to three requests (two without order checking). All requests consume Copilot usage and appear in the run details/report.
-- Citations must match supplied text, allowing only whitespace differences and retaining the original source passage. Wording, numbers, punctuation, and Markdown must match. This validates quotation provenance, not whether the passage supports the judgment. Missing evidence prevents verification of factual correctness, but does not block a provisional recommendation based on the tasks and responses; no model assessment is verified ground truth.
+- Citations must match supplied text, allowing only whitespace differences and retaining the original source passage. Wording, numbers, punctuation, and Markdown must match. This validates quotation provenance, not whether the passage supports the judgment. Missing evidence may still yield an evaluator opinion, but unsupported grounding cannot establish a preference; no model assessment is verified ground truth.
 - Direct reviews preserve both complete responses, their tasks, and all supplied evidence. Before each request (including reversed order and citation corrections), CompareLab counts the full messages with the selected model's token counter and checks its reported input-token limit. There is no fixed 150,000-character cap on direct review packets. Missing/invalid token metadata fails explicitly rather than assuming the packet fits.
 - If the packet exceeds the evaluator's input limit, the error shows the counted tokens, evaluator ID, and reported limit. Choose a larger-context evaluator; CompareLab does not silently excerpt or summarize evidence to make it fit. Larger reviews can take longer and consume more tokens.
-- Cancel from the panel or progress notification. Reviews still enforce a 180-second evaluation timeout and a 2 MiB response limit per request.
+- Cancel from the panel or progress notification. Reviews use the configured VS Code timeout (600 seconds by default) for the complete review stage and a 2 MiB response limit per request.
 
 **Saved review failed with “Review exceeds the 150,000-character limit”?** Older versions applied that fixed cap even after full investigations began retaining larger evidence sets. Updated direct reviews use the evaluator's token limit instead. Open the saved comparison and click **Review existing responses** to review the displayed response pair without rerunning its investigations; the original historical failed attempts remain unchanged.
 
@@ -293,9 +309,9 @@ Remote endpoints must use **HTTPS**; HTTP is permitted only for local loopback a
 
 ### Generate both without tools
 
-Configure providers and model IDs on both sides, then open **Other actions → Generate both (no tools)**. This skips tools and evaluation regardless of comparison mode. Runs execute **sequentially**, not concurrently, to reduce resource contention on a shared local GPU. Each successful run updates its response, reported model ID, token usage and finish reason when available. If one side fails, the other is still attempted.
+Configure providers and model IDs on both sides, then open **Other actions → Generate both (no tools)**. This skips tools and evaluation regardless of comparison mode. Runs execute **sequentially** by default to reduce resource contention on a shared local GPU; the **Run models simultaneously** checkbox also applies to this action. Each successful run updates its response, reported model ID, token usage and finish reason when available. If one side fails, the other is still attempted.
 
-Elapsed duration is recorded in experiment JSON and Markdown reports when available. These sequential wall-clock measurements are not a controlled performance benchmark; missing measurements stay unknown.
+Elapsed duration is recorded in experiment JSON and Markdown reports when available. These wall-clock measurements are not a controlled performance benchmark, especially with concurrent requests competing for resources; missing measurements stay unknown.
 
 ## Understanding the results
 
@@ -337,6 +353,62 @@ Optional top-level `evidence` contains the source snapshot and `review.checkOrde
 
 **Exports can contain sensitive prompts, evidence, and responses.** Check them before committing or sharing. API keys are never included.
 
+## Acceptance and decision readiness
+
+- **Required phrases** are case-insensitive substring checks on the visible response, excluding recognized provider-envelope metadata. A judged winner that misses a required phrase cannot be recommended. This does not automatically award the other side a win.
+- Repeated tests show pass counts across successful responses. A side that fails a required check in any successful response cannot receive the aggregate recommendation. Errors remain errors, not acceptance passes.
+- Acceptance is recomputed from retained outputs and configured checks when reopening records; saved pass/fail booleans are not trusted. UI, Markdown, and HTML preserve the original evaluator judgment separately from recommendation readiness.
+- Budget-limited investigations and truncated tool evidence block recommendations in individual, reopened, and standalone reviews. Repeated recommendations also require matching output/checker bindings for every pair; a majority cannot hide stale executable observations.
+- Prompt edits that produce identical effective model instructions cannot be labeled **Better** or **Worse**, even if metadata and sampled outputs differ.
+- Latency ratios require valid paired timing for every planned run. Partial timing samples remain visible but are not presented as a complete speed comparison.
+
+Literal checks can be gamed by repeating the required text. They are not semantic tests, code execution, or proof of correctness. Use independent tests and representative inputs before adoption.
+
+## Build a representative test suite
+
+CompareLab runs repeated pairs for **one task at a time**, not dataset batches. Optional isolated Node.js checks can execute single-file answers and gate recommendations. External test observations can be supplied as source evidence, but are not authenticated executable acceptance results. Required phrases remain literal substring checks.
+
+### Resolving inconclusive reviews
+
+Enable **Advanced settings -> Resolve inconclusive reviews** for one follow-up round per reviewed pair. The reviewer identifies disputed criteria, then uses the selected, freshly verified read-only tools to gather relevant observations for both frozen outputs. Each tool call still requires approval. Collection is limited to three model requests, six tool calls, and 128 KiB of retained supplemental evidence; exhausting a limit is an explicit failure, not silently truncated success. A single adjudication follows, with at most one citation repair: up to five extra model requests per pair. The complete review-stage timeout includes checking, initial reviews and resolution.
+
+If no suitable tools are selected, the adjudicator re-examines the supplied contract, outputs and checker observations and explicitly reports that no new tool evidence was obtained. It cannot manufacture facts. Original reviews, new observations, failures, usage and the adjudication remain in the audit details and exports. Later evidence is never retroactively inserted into generation inputs. An adjudicated recommendation does not erase the original order disagreement; confidence remains low when that matters. Prompt adoption still distinguishes a practical pick from an established instruction improvement.
+
+The collection audit retains rejected tool requests and their errors, even when a later corrected request succeeds; only successful observations go to adjudication. Completed collection requests and token usage remain counted if the formatted evidence exceeds the size limit and is rejected.
+
+### Optional isolated executable checks
+
+1. Prepare a trusted, dependency-free CommonJS checker using `node:test`. It receives the generated module path in `process.argv[2]`; see [the scheduler checker](../examples/check-async-scheduler.cjs). Answers must contain exactly one JavaScript/CommonJS fenced code block.
+2. Start a **local** Linux Docker engine (Docker Desktop on macOS/Windows) and obtain the image with `docker pull node:22-alpine`. CompareLab does not start Docker, pull images, or use remote Docker engines automatically.
+3. Use **Advanced settings -> Select executable checker**. The checker is snapshotted into the experiment, including its source; review it before sharing exports. The default per-answer deadline is 30 seconds; imported configurations may specify 5-120 seconds.
+4. Approve execution for each comparison/review. Each answer runs in a separate container using the resolved image ID, with no network, read-only root and input mounts, no workspace/credential/Docker-socket mounts, a non-root user, dropped capabilities, and CPU/memory/process/output limits. Containers and temporary files are removed afterward, including after cancellation or timeouts.
+5. Inspect **Executable check observations**. Both the checker and exact visible answers are hash-bound to results. Exit zero alone is not a pass: the Node test runner must report passing tests. Failed, timed-out, missing or mismatched checks block recommendation of that answer. Passing limited tests is not proof of general correctness.
+
+Completed checker observations survive later evaluator errors, review timeouts, and cancellation without rerunning the answers. This applies to both paired tests and **Review existing responses**: observations remain visible and can be saved to history or exported as JSON, Markdown, or HTML even without a quality assessment. Standalone observations use the optional top-level `verificationResults` field; changed answers or checker source cannot reuse those results.
+
+Docker is optional for everything else. Container isolation is not a guarantee against deliberately hostile code, and code sharing a process with a checker can attempt to interfere with tests. Use a disposable Docker environment for adversarial outputs; review checkers and avoid secrets in them. Results in imported JSON are user-supplied records, not signed attestations. No generated code is ever silently run on the host as a fallback.
+
+Start with 10-20 sanitized tasks from the work you actually do, including typical requests, edge cases, and cases where the correct answer is to report missing information. For example:
+
+| Task family | Independent correctness check |
+| --- | --- |
+| Implement a small API | Unit tests for its contract, including invalid input |
+| Fix a bug | Reproduction test plus existing regression tests |
+| Extract structured data | JSON parsing, schema validation, and exact expected values |
+| Answer from supplied documents | Expected facts and source references; human review where ambiguous |
+| Investigate an incident | Known observations, allowed actions, and explicit unknowns |
+
+1. Define the expected behavior and tests **before** generating responses. Keep several tasks held out while tuning prompts; do not rewrite expectations to favor the latest output.
+2. Save an experiment JSON for each task. Freeze its input, evidence, and acceptance criteria. For a model comparison, change only the model; for a prompt comparison, keep the model/settings fixed and change only the instructions.
+3. Import each task, run the same number of paired repetitions, and save/export every attempt. Keep execution mode, timeout, model versions when available, and evaluator consistent. Use shared evidence rather than live MCP responses to isolate the change being tested.
+4. Validate **each** response independently. For coding, the [scheduler demo](../examples/async-scheduler-demo.md#check-the-actual-code) already has an executable checker with 11 cases. Review generated code first; run untrusted code only in an externally isolated, disposable environment with no secrets and an enforced process timeout. CompareLab does not provide that isolation.
+5. Record a row per task and attempt: baseline pass/fail, candidate pass/fail, failed checks, generation errors/timeouts, latency, and usage. Keep execution failures in the planned-attempt denominator rather than dropping or selectively retrying them. Report task-family results too, so many easy tasks cannot hide a critical regression.
+6. Compare **tasks passing their required checks**, not the number of assertions passed. A task with 100 easy assertions should not outweigh a task with one critical requirement. Use model-judge feedback for qualitative differences, not to override failed correctness checks.
+
+For example, predeclare: "All critical tasks must pass; no regression on the held-out tasks; compare cost and latency only among acceptable variants." The appropriate thresholds depend on your workload. A small repeated suite is a regression signal, not statistical proof of general model superiority.
+
+Until batch execution and external-check ingestion exist, keep this results table alongside the exported comparisons; do not assume CompareLab's **Preferred** label incorporates external tests.
+
 ## Current capabilities
 
 - Optional cited Copilot evaluation and fresh Copilot Chat draft handoff (unreleased additions).
@@ -344,7 +416,7 @@ Optional top-level `evidence` contains the source snapshot and `review.checkOrde
 - Verdict-first reports, readable triage responses, order-bias checking, and missing-evidence abstention.
 - Two-variant word-level inline diff (large inputs use a coarse replacement fallback).
 - Per-side manual entry or opt-in non-streaming Ollama/OpenAI-compatible model runs.
-- Deterministic required-phrase checks and descriptive comparability warnings.
+- Deterministic required-phrase acceptance gates and descriptive comparability warnings.
 - JSON import/export, Markdown reports, standalone CLI and Node built-in tests.
 - API keys in VS Code SecretStorage; no account, backend, or hosted telemetry.
 

@@ -1,4 +1,5 @@
 'use strict';
+const { comparisonDecision, pairDecision } = require('./decision');
 
 const PROMPT_REVIEW_INSTRUCTIONS = `
 This is a PROMPT EDIT review, not a model comparison. A is the original prompt/output; B is the edited prompt/output.
@@ -74,7 +75,11 @@ function promptDecision(result) {
   const changes = assessments.flatMap(assessment => assessment.promptChanges || []);
   const preference = record ? result.testSummary?.preference : result.evaluation?.verdict;
   const complete = record ? record.status === 'completed' && assessments.length === record.plan.repetitions : assessments.length === 1;
-  const trusted = complete && assessments.every(assessment => assessment.preferenceEstablished === true &&
+  const gates = record ? record.pairs.map(pair => pairDecision(record.plan, pair)) : [comparisonDecision(result)];
+  const blockers = gates.flatMap(gate => gate.status === 'blocked' ? gate.reasons : []);
+  const preferred = gates.every(gate => gate.status === 'preferred');
+  const effectiveChanged = prompt?.effectiveChanged !== false;
+  const trusted = complete && preferred && effectiveChanged && !blockers.length && assessments.every(assessment => assessment.preferenceEstablished === true &&
     assessment.orderConsistent === true && assessment.promptChanges?.length &&
     assessment.criteria?.some(item => item.criterion === 'grounding' && item.verdict !== 'insufficient_evidence') &&
     assessment.criteria?.some(item => ['grounding', 'reasoning', 'completeness', 'actionability', 'uncertainty'].includes(item.criterion) && item.verdict === preference) &&
@@ -89,8 +94,10 @@ function promptDecision(result) {
   const verdict = trusted && benefit ? 'Better' : trusted && worse ? 'Worse' : 'No clear improvement';
   return {
     verdict,
-    action: verdict === 'Better' ? 'Use edited prompt' : verdict === 'Worse' ? 'Keep original prompt' : 'Keep original for now',
+    action: blockers.length ? 'Resolve acceptance blockers' : verdict === 'Better' ? 'Use edited prompt' : verdict === 'Worse' ? 'Keep original prompt' : 'Keep original for now',
     reason: !prompt?.spans.some(span => span.type !== 'equal') ? 'The prompts are identical.'
+      : !effectiveChanged ? 'Only metadata or non-executable text changed; the effective model instructions are identical.'
+      : blockers.length ? [...new Set(blockers)].join(' ')
       : !complete ? 'Complete both investigations and their review before deciding.'
       : verdict === 'Better' ? 'Cited output improvements support adopting these edits for this test.'
       : verdict === 'Worse' ? 'Cited output regressions support retaining the original for this test.'

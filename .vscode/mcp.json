@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "pokemon": {
+      "type": "http",
+      "url": "https://gateway.pipeworx.io/pokemon/mcp"
+    }
+  }
+}

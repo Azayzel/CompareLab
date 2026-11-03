@@ -204,6 +204,10 @@ test('prompt decisions distinguish better, worse, uncertain, incomplete and unsa
     r => { r.evaluation.orderConsistent = false; },
     r => { r.evaluation.orderConsistent = null; },
     r => { r.evaluation.preferenceEstablished = false; },
+    r => {
+      r.evaluation.resolution = { status: 'completed' };
+      r.evaluation.judgments[1].criteria[0].verdict = 'baseline';
+    },
     r => { r.evaluation.promptChanges = []; },
     r => { r.evaluation.promptChanges[0].effect = 'uncertain'; },
     r => { r.evaluation.judgments[1].promptChanges[0].effect = 'uncertain'; },
@@ -225,6 +229,25 @@ test('prompt decisions distinguish better, worse, uncertain, incomplete and unsa
   assert.match(promptDecision(result).caveat, /representative inputs/);
   result.comparisonMode = 'end-to-end';
   assert.match(promptDecision(result).caveat, /different evidence/);
+});
+
+test('required checks prevent adopting a judge-preferred prompt in direct and saved repeated reviews', async () => {
+  const source = { ...input(), checks: { requiredPhrases: ['401', '403'] } };
+  const evaluation = await reviewed();
+  const direct = { ...compare(source), evaluation, fairness: { warnings: [] } };
+  assert.equal(promptDecision(direct).verdict, 'No clear improvement');
+  assert.equal(promptDecision(direct).action, 'Resolve acceptance blockers');
+  assert.match(promptDecision(direct).reason, /failed required checks.*403/);
+  const record = await orchestrateTest(source, {
+    comparePair: compare, runVariant: async (request, side) => ({ ...request, response: source[side].response }),
+    evaluatePair: async () => evaluation
+  });
+  const reopened = validateTestRecord(JSON.parse(JSON.stringify(record)));
+  const result = { ...compare({ ...source, testRun: reopened }), evaluation };
+  assert.equal(result.testSummary.preference, 'inconclusive');
+  assert.equal(promptDecision(result).verdict, 'No clear improvement');
+  assert.match(asMarkdown(result), /failed required checks/);
+  assert.doesNotMatch(asHtml(result, { css: '', markdownScript: '' }), /Use edited prompt|★ Preferred/);
 });
 
 test('prompt recommendations survive frozen tests, import, Markdown and safe HTML export', async () => {

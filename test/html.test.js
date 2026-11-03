@@ -5,11 +5,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { asHtml } = require('../src/reporting/html');
 const { compare } = require('../src/comparison/core');
-const { orchestrateTest } = require('../src/comparison/orchestration');
+const { orchestrateTest, summarizeTest } = require('../src/comparison/orchestration');
 
 const assets = {
   css: ['style.css', 'runners.css'].map(file => fs.readFileSync(path.join(__dirname, '../media', file), 'utf8')).join('\n'),
-  markdownScript: fs.readFileSync(path.join(__dirname, '../media/markdown.js'), 'utf8')
+  markdownScript: fs.readFileSync(path.join(__dirname, '../media/markdown.js'), 'utf8'),
+  logoPng: fs.readFileSync(path.join(__dirname, '../media/comparelab-icon.png'))
 };
 const input = () => ({ prompt: 'Diagnose the alert.', evidence: 'HTTP 401 increased.', baseline: {
   model: 'model-a', response: '# Findings\n\n**401 increased.**', inputTokens: 120, outputTokens: 30, elapsedMs: 1200
@@ -44,12 +45,45 @@ test('HTML report embeds styling and safe Markdown locally, with token provenanc
   assert.match(html, /Raw response/);
   assert.match(html, /@media print/);
   assert.match(html, /default-src 'none'/);
+  assert.match(html, /img-src data:;/);
+  assert.doesNotMatch(html, /⇄ CompareLab|<img[^>]+src="https?:/);
+  const logo = /class="brand-logo" src="data:image\/png;base64,([^"]+)"/.exec(html);
+  assert.ok(logo, 'The brand image must be embedded for offline reports');
+  assert.deepEqual(Buffer.from(logo[1], 'base64'), assets.logoPng);
   assert.doesNotMatch(html, /<script[^>]+src=|<link[^>]+href=|onload=/);
   const nonce = /script-src 'nonce-([^']+)'/.exec(html)[1];
   assert.ok([...html.matchAll(/<script\b([^>]*)>/g)].every(match => match[1].includes(`nonce="${nonce}"`)));
   const payload = JSON.parse(/<script id="reportData"[^>]*>([\s\S]*?)<\/script>/.exec(html)[1]);
   assert.equal(payload[0], input().baseline.response);
   assert.equal(payload[1], input().candidate.response);
+});
+
+test('repeated-run response badges use each pair decision, not aggregate confidence', async () => {
+  let review = 0;
+  const record = await orchestrateTest({ ...input(), review: { decisionPolicy: 'best-supported' }, test: { repetitions: 2 } }, {
+    comparePair: () => ({ checks: [], fairness: { warnings: [] } }),
+    runVariant: async (request, side) => ({ ...request, response: side + ' answer' }),
+    evaluatePair: async () => {
+      const provisional = ++review === 1;
+      return { verdict: 'candidate', preferenceEstablished: true, orderConsistent: true,
+        summary: 'Candidate follows the evidence.', criteria: [
+          { criterion: 'grounding', verdict: provisional ? 'insufficient_evidence' : 'candidate', rationale: 'Grounding review.', citations: [] },
+          { criterion: 'reasoning', verdict: 'candidate', rationale: 'Supported reasoning.', citations: [] }
+        ], unknowns: [], judgments: [], inputTokenEstimates: [], usageTurns: [], requestCount: 1,
+        citationRepairs: 0, elapsedMs: 1, rubricVersion: 1, model: { name: 'Reviewer', id: 'reviewer' } };
+    }
+  });
+  const result = compare(input());
+  result.testRun = record;
+  result.testSummary = summarizeTest(record);
+  const html = asHtml(result, assets);
+  const pairReports = [...html.matchAll(/<section class="report-run">([\s\S]*?)(?=<section class="report-run">|<section class="report-context">)/g)]
+    .map(match => match[1]);
+  assert.equal(result.testSummary.confidence, 'low');
+  assert.equal(pairReports.length, 2);
+  assert.match(pairReports[0], /Provisional pick/);
+  assert.match(pairReports[1], /★ Preferred/);
+  assert.doesNotMatch(pairReports[1], /Provisional pick/);
 });
 
 test('untrusted report content cannot escape markup, attributes, or the embedded JSON script', () => {

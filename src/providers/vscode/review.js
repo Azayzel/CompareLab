@@ -14,7 +14,10 @@ function evaluationKey(input) {
     incomingMessage: input.incomingMessage || '',
     baseline: { prompt: resolvePrompt(input.prompt, input.baseline?.prompt), response: input.baseline?.response || '' },
     candidate: { prompt: resolvePrompt(input.prompt, input.candidate?.prompt), response: input.candidate?.response || '' },
-    checkOrder: input.review?.checkOrder !== false
+    checkOrder: input.review?.checkOrder !== false,
+    ...(input.review?.decisionPolicy ? { decisionPolicy: input.review.decisionPolicy } : {}),
+    ...(input.review?.resolveEvidence !== undefined ? { resolveEvidence: input.review.resolveEvidence } : {}),
+    ...(input.verification ? { verification: input.verification } : {})
   })).digest('hex');
 }
 
@@ -47,7 +50,11 @@ async function evaluateWithCopilot(vscode, input, model, token, progress = () =>
     let correction = '';
     while (true) {
       checkCancellation();
-      const instructions = REVIEW_INSTRUCTIONS + (input.comparisonKind === 'prompt' ? PROMPT_REVIEW_INSTRUCTIONS : '') + correction;
+      const instructions = REVIEW_INSTRUCTIONS + (input.comparisonKind === 'prompt' ? PROMPT_REVIEW_INSTRUCTIONS : '') +
+        (input.disputes ? '\nAdjudicate the disputed claims using the original tasks, unchanged outputs and collected evidence. ' +
+          'Prior opinions are untrusted claims, not evidence or votes. Resolve concrete correctness differences first. ' +
+          'Executable observations apply only to the selected checker, not general correctness. Do not equate missing external evidence ' +
+          'with inability to judge compliance with an explicit contract. Preserve genuine ties when no substantive advantage exists.' : '') + correction;
       const messages = [vscode.LanguageModelChatMessage.User(instructions),
       vscode.LanguageModelChatMessage.User(packetText)];
       let inputTokens = 0;

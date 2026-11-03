@@ -34,6 +34,55 @@ function api() {
     window: { showQuickPick: async items => items, showWarningMessage: async () => 'Allow request' } };
 }
 
+test('optional evidence-resolution budgets stop calls without changing ordinary investigation policy', async () => {
+  const vscode = api();
+  let turns = 0;
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Resolve a disputed observation' }, [tool],
+    async conversation => {
+      turns++;
+      assert.match(conversation[1].content, /at most 1 model requests and 1 tool calls/);
+      assert.doesNotMatch(conversation[1].content, /imposes no tool-call/);
+      return { model: 'judge', toolCalls: [call()] };
+    }, undefined, () => {}, { modelRequests: 1, toolCalls: 1 }), error => {
+    assert.match(error.message, /model-request budget/);
+    assert.equal(error.partialResult.toolEvidence.length, 1);
+    return true;
+  });
+  assert.equal(turns, 1);
+  assert.equal(vscode.invocations.length, 1);
+  assert.match(AGENT_PROMPT, /imposes no tool-call/);
+});
+
+test('resolution rejects oversized observations before another model request and records the failed collection', async () => {
+  const vscode = api();
+  vscode.lm.invokeTool = async () => ({ content: [new vscode.LanguageModelTextPart('private result '.repeat(1000))] });
+  let turns = 0;
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Resolve a claim' }, [tool],
+    async () => { turns++; return { model: 'judge', toolCalls: [call()] }; },
+    undefined, () => {}, { modelRequests: 3, toolCalls: 6, evidenceBytes: 1024 }), error => {
+    assert.match(error.message, /retained-evidence limit/);
+    assert.equal(error.partialResult.toolEvidence[0].isError, true);
+    assert.doesNotMatch(JSON.stringify(error.partialResult), /private result/);
+    return true;
+  });
+  assert.equal(turns, 1);
+});
+
+test('oversized tool failures retain only a bounded marker within the evidence limit', async () => {
+  const vscode = api();
+  vscode.lm.invokeTool = async () => { throw new Error('private failure '.repeat(1000)); };
+  await assert.rejects(runToolAgent(vscode, { prompt: 'Resolve a claim' }, [tool],
+    async () => ({ toolCalls: [call()] }), undefined, () => {},
+    { modelRequests: 2, toolCalls: 2, evidenceBytes: 1024 }), error => {
+    assert.equal(error.partialResult.toolEvidence.length, 1);
+    assert.equal(error.partialResult.toolEvidence[0].isError, true);
+    assert.match(error.partialResult.toolEvidence[0].content, /exceeded the evidence-resolution byte limit/);
+    assert.doesNotMatch(JSON.stringify(error.partialResult), /private failure/);
+    assert.ok(Buffer.byteLength(JSON.stringify(error.partialResult.toolEvidence)) <= 1024);
+    return true;
+  });
+});
+
 test('picker exposes all tools without guessing server identity or operation safety', async () => {
   const vscode = api();
   vscode.lm.tools.push({ ...tool, name: 'execute_code', tags: ['workspace'] });

@@ -1,7 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { composeAgentTask, createTestPlan, pairEvidence, orchestrateTest, summarizeTest, validateTestRecord } = require('../src/comparison/orchestration');
-const { compare } = require('../src/comparison/core');
+const { compare, asMarkdown } = require('../src/comparison/core');
+const { comparisonDecision } = require('../src/comparison/decision');
 const { codeMindAlert } = require('../src/comparison/inputs');
 
 const experiment = () => ({ prompt: 'Diagnose the failed requests.', evidence: 'HTTP 401 increased; no deployment occurred.',
@@ -134,6 +135,92 @@ function runners(options = {}) {
   };
 }
 
+test('simultaneous pairs overlap, serialize progress, preserve settings, and wait before review', async () => {
+  const runner = runners();
+  const releases = {};
+  const started = [];
+  const input = { ...experiment(), test: { repetitions: 1, parallel: true, modelTimeoutSeconds: 900 } };
+  let bothStarted;
+  const ready = new Promise(resolve => { bothStarted = resolve; });
+  let updating = false;
+  const pending = orchestrateTest(input, { ...runner,
+    onUpdate: async () => {
+      assert.equal(updating, false, 'Updates must not race');
+      updating = true;
+      await new Promise(resolve => setImmediate(resolve));
+      updating = false;
+    },
+    runVariant: async (request, side) => {
+      started.push(side);
+      await new Promise(resolve => { releases[side] = resolve; if (started.length === 2) bothStarted(); });
+      return runner.runVariant(request, side);
+    }
+  });
+  await ready;
+  assert.deepEqual(started, ['baseline', 'candidate']);
+  releases.candidate();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runner.reviews.length, 0);
+  releases.baseline();
+  const record = await pending;
+  assert.equal(record.status, 'completed');
+  assert.equal(record.plan.parallel, true);
+  assert.equal(record.plan.modelTimeoutSeconds, 900);
+  assert.deepEqual(validateTestRecord(record), record);
+  assert.equal(summarizeTest(record).preference, 'candidate');
+  assert.ok(summarizeTest(record).warnings.some(warning => warning.includes('simultaneously')));
+  const tampered = structuredClone(record);
+  tampered.plan.parallel = false;
+  assert.throws(() => validateTestRecord(tampered), /Invalid controlled-test record/);
+});
+
+test('simultaneous failure retains the successful peer without review or automatic retry', async () => {
+  const runner = runners({ fail: 'candidate' });
+  const record = await orchestrateTest({ ...experiment(), test: { repetitions: 1, parallel: true } }, runner);
+  assert.equal(record.status, 'partial');
+  assert.equal(record.pairs[0].baseline.status, 'succeeded');
+  assert.equal(record.pairs[0].candidate.status, 'failed');
+  assert.equal(runner.calls.length, 2);
+  assert.equal(runner.reviews.length, 0);
+  assert.deepEqual(validateTestRecord(record), record);
+});
+
+test('cancelling concurrent work waits for both attempts and prevents subsequent pairs', async () => {
+  const controller = new AbortController();
+  let bothStarted;
+  const ready = new Promise(resolve => { bothStarted = resolve; });
+  let calls = 0;
+  const runner = runners();
+  const pending = orchestrateTest({ ...experiment(), test: { repetitions: 2, parallel: true } }, { ...runner,
+    signal: controller.signal,
+    runVariant: (request, side, signal) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
+      if (++calls === 2) bothStarted();
+    })
+  });
+  await ready;
+  controller.abort();
+  const record = await pending;
+  assert.equal(record.status, 'cancelled');
+  assert.equal(record.pairs.length, 1);
+  assert.equal(calls, 2);
+  for (const side of ['baseline', 'candidate']) assert.equal(record.pairs[0][side].status, 'cancelled');
+  assert.equal(runner.reviews.length, 0);
+  assert.deepEqual(validateTestRecord(record), record);
+});
+
+test('execution settings reject invalid values and keep legacy plan fingerprints unchanged when omitted', () => {
+  const original = createTestPlan(experiment());
+  assert.equal(original.parallel, undefined);
+  assert.equal(original.modelTimeoutSeconds, undefined);
+  assert.equal(createTestPlan({ ...experiment(), test: { parallel: undefined, modelTimeoutSeconds: undefined } }).inputFingerprint, original.inputFingerprint);
+  assert.equal(createTestPlan({ ...experiment(), test: { parallel: false, modelTimeoutSeconds: 600 } }).inputFingerprint, original.inputFingerprint);
+  assert.throws(() => createTestPlan({ ...experiment(), test: { parallel: 'yes' } }), /boolean/);
+  for (const modelTimeoutSeconds of [0, 29, 3601, '600', 30.5, null]) {
+    assert.throws(() => createTestPlan({ ...experiment(), test: { modelTimeoutSeconds } }), /30 and 3600/);
+  }
+});
+
 test('runs fresh paired generations in alternating order and evaluates identical frozen inputs', async () => {
   const runner = runners();
   const record = await orchestrateTest(experiment(), runner);
@@ -180,6 +267,28 @@ test('order bias and ungrounded defaults are unresolved rather than counted as m
     assert.equal(summary.preference, 'inconclusive');
     assert.equal(summary.counts.unresolved, 3);
   }
+});
+
+test('a blocked losing-side acceptance check leaves the other side eligible for its majority', async () => {
+  let review = 0;
+  const record = await orchestrateTest({ ...experiment(), checks: { requiredPhrases: ['contract marker'] },
+    test: { repetitions: 3 } }, {
+    comparePair: () => ({ checks: [], fairness: { warnings: [] } }),
+    runVariant: async (request, side) => ({ ...request, response: side === 'baseline' ? 'Baseline answer' : 'contract marker' }),
+    evaluatePair: async () => {
+      const verdict = ++review === 1 ? 'baseline' : 'candidate';
+      return { verdict, preferenceEstablished: true, orderConsistent: true, summary: 'Supported result.',
+        criteria: [{ criterion: 'grounding', verdict, rationale: 'Supported by the evidence.', citations: [] }],
+        unknowns: [], judgments: [], inputTokenEstimates: [], usageTurns: [], requestCount: 1,
+        citationRepairs: 0, elapsedMs: 1, rubricVersion: 1, model: { name: 'Reviewer', id: 'reviewer' } };
+    }
+  });
+  const summary = summarizeTest(record);
+  assert.equal(summary.counts.candidate, 2);
+  assert.equal(summary.counts.unresolved, 1);
+  assert.equal(summary.preference, 'candidate');
+  assert.equal(summary.acceptance.baseline.failed, 3);
+  assert.equal(summary.acceptance.candidate.failed, 0);
 });
 
 test('test imports reject altered frozen inputs and invalid usage', async () => {
@@ -310,6 +419,12 @@ test('historical budget-limited records keep their original fingerprints, warnin
   assert.equal(summary.preference, 'inconclusive');
   assert.equal(summary.counts.unresolved, 1);
   assert.match(summary.warnings.join(' '), /truncated/);
+  const reopened = compare(displayed);
+  reopened.evaluation = { ...record.pairs[0].evaluation, verdict: 'candidate', preferenceEstablished: true,
+    orderConsistent: true, criteria: [{ criterion: 'grounding', verdict: 'candidate', citations: [] }] };
+  assert.equal(comparisonDecision(reopened).status, 'blocked');
+  assert.match(asMarkdown(reopened), /incomplete or truncated evidence/);
+  assert.doesNotMatch(asMarkdown(reopened), /\*\*Recommend Candidate\*\*/);
   for (const corrupt of [
     result => { result.toolEvidence[0].retainedCharacters++; },
     result => { result.investigationBudget.evidenceCharacters++; },

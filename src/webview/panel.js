@@ -52,10 +52,11 @@ function panelHtml(vscode, panel, context) {
   const media = (...parts) => panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'media', ...parts));
   return `<!doctype html><html lang="en"><head><meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${panel.webview.cspSource}; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${panel.webview.cspSource}; style-src ${panel.webview.cspSource}; script-src 'nonce-${nonce}';">
   <link rel="stylesheet" href="${media('style.css')}"><link rel="stylesheet" href="${media('runners.css')}">
   <title>CompareLab</title></head><body><main>
-  <header><div><h1>⇄ CompareLab</h1><p>Visual, context-aware model comparisons.</p></div>
+  <header><div class="brand"><img class="brand-logo" src="${media('comparelab-icon.png')}" alt="" width="44" height="44">
+  <div><h1>CompareLab</h1><p>Compare models. Test prompt changes.</p></div></div>
   <details id="shareActions"><summary id="shareActionsLabel">Save / export</summary>
   <div id="currentActions" class="buttons"><button id="historySave">Save to history</button><button id="import">Import JSON</button><button id="export">Export JSON</button><button id="report">Markdown report</button><button id="htmlReport">Export HTML</button></div></details></header>
   <nav class="view-tabs" role="tablist" aria-label="CompareLab views">
@@ -119,9 +120,20 @@ function panelHtml(vscode, panel, context) {
   <div id="promptModeSlot"></div>
   <div class="actionbar">
   <label>Paired runs <input id="testRepetitions" type="number" min="1" max="5" value="3"></label>
-  <label>Required phrases (comma-separated) <input id="checks" placeholder="e.g. 401, 403"></label>
+  <label>VS Code timeout (seconds) <input id="modelTimeoutSeconds" type="number" min="30" max="3600" step="1" value="600"></label>
+  <label>Required phrases (acceptance gates, comma-separated) <input id="checks" placeholder="e.g. 401, 403"></label>
   </div>
   <label class="checkbox"><input id="checkOrder" type="checkbox" checked>Check reversed order (2 reviews)</label>
+  <label>Recommendation policy <select id="decisionPolicy">
+  <option value="best-supported">Best-supported pick with confidence</option>
+  <option value="strict">Strict: recommend only with consistent support</option></select></label>
+  <label class="checkbox"><input id="resolveEvidence" type="checkbox" checked>Resolve inconclusive reviews (one evidence round per pair)</label>
+  <p class="notice">Resolution uses selected, freshly verified read-only tools with per-call approval: at most 3 collection requests and 6 tool calls, then one adjudication (plus a citation repair if needed). Without tools it rechecks the supplied evidence; it never invents missing observations. Extra requests add cost and latency. Genuine ties remain possible.</p>
+  <div class="actionbar"><button id="selectChecker" type="button">Select executable checker</button>
+  <button id="clearChecker" type="button">Remove checker</button><span id="checkerSummary" class="notice">No executable checker selected.</span></div>
+  <p class="notice">Optional: single-file CommonJS answers and a trusted node:test checker accepting the solution path as its argument. Requires Docker and a local node:22-alpine image. Runs only after explicit approval, with no network or workspace mounts. The checker source is retained in exports. Paste external test observations into Source evidence if you do not use Docker.</p>
+  <label class="checkbox"><input id="parallelModels" type="checkbox">Run models simultaneously</label>
+  <p class="notice">Simultaneous runs may share provider quotas or local compute. Reviews wait for both outputs. Timeout applies to each VS Code generation request and each complete review stage; cancellation remains available.</p>
   <p id="testBudget" class="notice"></p>
   </details>
   <details id="otherActions" class="secondary-controls"><summary>Other actions</summary>

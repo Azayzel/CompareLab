@@ -187,8 +187,9 @@ test('reports lead with the assessment and retain its evidence, evaluator identi
   result.evaluation = { ...judgment, model: { name: 'Reviewer', id: 'reviewer', version: 'snapshot' }, rubricVersion: 1,
     orderConsistent: null, judgments: [judgment], elapsedMs: 200, inputTokenEstimates: [100, 150], requestCount: 2, citationRepairs: 1, note: 'Not verified ground truth.' };
   const report = asMarkdown(result);
-  assert.ok(report.includes('**Recommend Candidate**'));
-  assert.ok(report.indexOf('**Recommend Candidate**') < report.indexOf('## Recorded runs'));
+  assert.match(report, /No supported recommendation/);
+  assert.match(report, /Response-order consistency was not checked/);
+  assert.ok(report.indexOf('## Decision readiness') < report.indexOf('## Recorded runs'));
   assert.match(report, /version snapshot/);
   assert.match(report, /HTTP 401/);
   assert.match(report, /Latency \(ms\) \| 123/);
