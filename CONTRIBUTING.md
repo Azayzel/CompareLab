@@ -30,6 +30,11 @@ The scoped `minimatch` override addresses [GHSA-g3hv-75wg-m249](https://github.c
 
 The `.vscodeignore` allowlist includes only the manifest, README, license, runtime source, and webview assets. Keep this list in sync when adding runtime files outside `src/` or `media/`. Tests, examples, local exports, editor configuration, and generated packages must not enter the VSIX. See [Build and package](docs/guide.md#build-and-package) for installation and registry-access troubleshooting.
 
+Keep documentation screenshots in `docs/images/`, outside the VSIX allowlist.
+Use relative image links in Markdown; `vsce` rewrites README image links to
+GitHub-hosted URLs using the package's repository metadata. Publish the images
+to the repository before releasing the extension. Keep runtime artwork in `media/`.
+
 ## Automated releases
 
 [release.yml](.github/workflows/release.yml) runs on pushes to `main`, including merged pull requests. It tests and packages the exact triggering commit, publishes the VSIX to the Marketplace, then publishes a GitHub Release with generated notes and the same VSIX.
