@@ -9,6 +9,15 @@ that cite the supplied evidence.
 Use models available in VS Code, connect Ollama or an OpenAI-compatible API,
 or paste existing responses. No hosted CompareLab service or runtime npm dependencies.
 
+[Install from the Marketplace](https://marketplace.visualstudio.com/items?itemName=azayzel-comparelab.comparelab)
+| [Screenshot walkthrough](docs/guide.md#screenshot-walkthrough)
+
+![CompareLab showing two GitHub issue-triage reports side by side, with a provisional pick and estimated token usage](docs/images/cl_reviewed.png)
+
+*Compare the answers, not just their wording. This captured GitHub triage run
+shows reported facts, missing evidence, and proposed next steps. The highlighted
+response is a provisional recommendation for this task, not a model ranking.*
+
 ## Quick start
 
 1. Install [CompareLab from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=azayzel-comparelab.comparelab).
@@ -49,6 +58,9 @@ Generation-only runs and reviews of existing responses are also under **Other ac
 By default, both prompts receive the same evidence without live tools.
 The review links the instruction change to quotes from both outputs.
 It can recommend keeping the original; a different answer is not automatically better.
+
+See the [screenshot walkthrough](docs/guide.md#screenshot-walkthrough) for prompt
+setup, progress, and review evidence.
 
 Try the [Pokemon MCP picnic](examples/pokemon-mcp-demo.md) for a free, no-key tool demo,
 or [GitHub triage](examples/github-tools-demo.md). Both include an agent file,

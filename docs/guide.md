@@ -5,6 +5,7 @@ advanced controls, provider troubleshooting, and how to interpret saved results.
 
 - [Quick start](#quick-start)
 - [Model comparisons](#run-comparison) and [prompt comparisons](#testing-a-prompt-change)
+- [Screenshot walkthrough](#screenshot-walkthrough)
 - [Build and install](#build-and-package)
 - [Tool selection and safety](#selecting-vs-code-tools)
 - [History](#comparison-history) and [exports](#assessment-and-export)
@@ -58,6 +59,71 @@ Each prompt-edit recommendation must quote a real instruction change and both ou
 **Review pasted outputs only**, inside **Other actions**, reviews supplied responses without generating new ones. Without controlled replay provenance, it may provide useful cited observations but will not establish a prompt improvement. The result explicitly identifies **Not reviewed**, **Review incomplete**, or **Review complete**, and shows completed review counts and any run/review errors. A failed or missing review is not presented as a completed "No clear improvement" judgment. Completed results are brought into view automatically. Text highlighting alone is never a quality judgment. HTML and Markdown exports preserve the prompt-change review and evidence quotes; saved comparisons can be reopened without rerunning anything.
 
 Snapshot collection usage is recorded separately from both prompt generations and evaluator usage. Guided draft usage is retained with the draft, also outside the test totals. Shared-evidence prompt tests using a VS Code model preserve the complete snapshot and count the actual request messages against that model's reported input-token limit, rather than the fixed 150,000-character generation limit. Exact-limit requests are allowed; oversized requests report the required and available tokens and require a larger-context model. Missing/invalid token counts or input limits fail explicitly. Endpoint providers and other generation paths retain the character limit. Timeout, record-size, and cancellation limits still apply; evidence is not silently shortened to fit. A failed collection stops explicitly before either prompt is tested.
+
+### Screenshot walkthrough
+
+These captures show CompareLab working with a public GitHub issue-triage smoke
+test. They illustrate the interface and recorded judgments, not verified model
+rankings or proof that a prompt edit helps. Model availability and tool names
+depend on your VS Code providers. Captured wording may differ from newer releases.
+
+#### Read the two reports
+
+![Two model reports for a synthetic GitHub issue, with a provisional-pick warning and expandable raw responses](images/cl_reviewed.png)
+
+Read **Summary**, **Evidence**, **Unknowns**, and **Next step** across both reports.
+In this capture, both responses identify a synthetic test rather than a confirmed
+bug. The highlighted report is a **Provisional pick**: the visible warning says
+the follow-up adjudication was not independently checked in reversed order.
+Inspect the rationale rather than treating the highlight as proof of correctness.
+The token counts marked with `~` are estimates, not billed usage.
+
+#### Inspect the review criteria
+
+![Per-criterion review showing grounding and uncertainty ties, other criteria favoring the baseline, and source-quote expanders](images/cl_reviewed_evidence.png)
+
+The review separates evidence grounding, reasoning, completeness, actionability,
+uncertainty, and clarity. Expand **Source quotes** to inspect the passages behind
+each judgment; a matching quote does not itself prove the judgment is sound.
+This capture includes a later pair still marked **Not reviewed**, so it is not
+evidence that the entire multi-pair comparison has finished.
+
+#### Set up a prompt comparison
+
+![Prompt comparison with one shared model, original and edited instruction fields, and a highlighted instruction diff](images/cl_prompt_comparison.png)
+
+Choose one shared model and place the two instruction versions in **Original
+prompt** and **Edited prompt**. The grouped diff shows what changed, not whether
+it improved the output. The shared input is still empty in this setup capture;
+enter the task before running. Supply a snapshot, or select verified read-only
+tools to collect shared evidence once for both prompts.
+
+Match the task to the instructions being tested. The issue-reading demo uses
+[the read-only example agent](../examples/github-triage.agent.md); the separate
+[Actions triage agent](../.github/agents/issue-triage.agent.md) expects checked-out
+source and trusted commit metadata. Fetching an issue alone cannot test its
+code-investigation requirements. Keep output-format rules in the instruction
+variants rather than adding conflicting headings to the shared input.
+
+#### Follow generation and review
+
+![Prompt-review progress with the original output complete and the edited output still running](images/cl_prompt_comparison_2.png)
+
+The stages distinguish preparation, shared evidence, each output, and review.
+Here, the original output is complete but the edited output is still running;
+no review has started. **Cancel review** stops remaining work and retains the
+available partial record. Elapsed time is not a completion estimate.
+
+When review completes, inspect the verdict and expand **See the prompt edit and
+output evidence**. **Uncertain** means the observed outputs do not establish
+that edit's benefit. If both already meet a requirement, do not count different
+wording as an improvement. Resolve setup conflicts or test an input that actually
+exercises the changed requirement before adopting it.
+
+For a reproducible starting point, follow the
+[GitHub triage demo](../examples/github-tools-demo.md). Save the comparison in
+History or export JSON to retain its prompts, evidence, and results; inspect
+exports for sensitive content before sharing them.
 
 ### Visual HTML export
 
